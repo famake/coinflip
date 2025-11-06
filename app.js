@@ -3,6 +3,10 @@
 let THREE, GLTFLoader, OBJLoader, OrbitControls;
 let threeJsAvailable = false;
 
+// Constants
+const PLACEHOLDER_IMAGE = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"%3E%3Crect fill="%23f0f0f0" width="400" height="400"/%3E%3Ctext fill="%23999" font-family="sans-serif" font-size="40" x="50%25" y="50%25" text-anchor="middle" dominant-baseline="middle"%3ENo Image%3C/text%3E%3C/svg%3E';
+const VIEWER_INIT_DELAY = 100; // Delay needed for DOM element to be fully rendered
+
 // Try to load Three.js modules
 async function loadThreeJS() {
     try {
@@ -142,6 +146,13 @@ class CoinCollection {
         });
     }
 
+    // Escape HTML to prevent XSS
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
     // Delete a coin
     deleteCoin(id) {
         if (confirm('Are you sure you want to delete this coin from your collection?')) {
@@ -179,7 +190,7 @@ class CoinCollection {
 
     // Create HTML for a coin card
     createCoinCard(coin) {
-        const imageUrl = coin.images.length > 0 ? coin.images[0] : 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"%3E%3Crect fill="%23f0f0f0" width="400" height="400"/%3E%3Ctext fill="%23999" font-family="sans-serif" font-size="40" x="50%25" y="50%25" text-anchor="middle" dominant-baseline="middle"%3ENo Image%3C/text%3E%3C/svg%3E';
+        const imageUrl = coin.images.length > 0 ? coin.images[0] : PLACEHOLDER_IMAGE;
         
         return `
             <div class="coin-card">
@@ -311,9 +322,9 @@ class CoinCollection {
 
         document.getElementById('coinModal').classList.remove('hidden');
 
-        // Initialize 3D viewer if model exists
+        // Initialize 3D viewer if model exists (delayed to ensure DOM is ready)
         if (coin.model3D) {
-            setTimeout(() => this.init3DViewer(coin.model3D), 100);
+            setTimeout(() => this.init3DViewer(coin.model3D), VIEWER_INIT_DELAY);
         }
     }
 
@@ -325,14 +336,25 @@ class CoinCollection {
         // If Three.js is not available, show a fallback message
         if (!threeJsAvailable) {
             container.innerHTML = `
-                <div style="display: flex; align-items: center; justify-content: center; height: 100%; flex-direction: column; gap: 1rem;">
-                    <p style="font-size: 1.2rem; color: #666;">3D Model: ${model3D.filename}</p>
-                    <p style="color: #999;">3D viewer requires online connection for Three.js library</p>
-                    <button onclick="window.open('${model3D.data}')" style="padding: 0.75rem 1.5rem; background: var(--primary-color); border: none; border-radius: 5px; cursor: pointer;">
+                <div class="viewer-fallback">
+                    <p class="viewer-fallback-title">3D Model: ${this.escapeHtml(model3D.filename)}</p>
+                    <p class="viewer-fallback-message">3D viewer requires online connection for Three.js library</p>
+                    <button class="btn-primary viewer-fallback-btn" data-download="true">
                         Download 3D Model
                     </button>
                 </div>
             `;
+            
+            // Add event listener for download button
+            const downloadBtn = container.querySelector('[data-download="true"]');
+            if (downloadBtn) {
+                downloadBtn.addEventListener('click', () => {
+                    const link = document.createElement('a');
+                    link.href = model3D.data;
+                    link.download = model3D.filename;
+                    link.click();
+                });
+            }
             return;
         }
 
@@ -405,14 +427,10 @@ class CoinCollection {
         
         const extension = model3D.filename.split('.').pop().toLowerCase();
         
-        // Convert base64 to blob
+        // Convert base64 to blob (optimized)
         const base64Data = model3D.data.split(',')[1];
         const byteCharacters = atob(base64Data);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-            byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
+        const byteArray = Uint8Array.from(byteCharacters, char => char.charCodeAt(0));
         const blob = new Blob([byteArray]);
         const url = URL.createObjectURL(blob);
 

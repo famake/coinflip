@@ -506,3 +506,26 @@ main {
         height: 200px;
     }
 }
+
+/* 3D Viewer Fallback */
+.viewer-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.viewer-fallback-title {
+    font-size: 1.2rem;
+    color: #666;
+}
+
+.viewer-fallback-message {
+    color: #999;
+}
+
+.viewer-fallback-btn {
+    padding: 0.75rem 1.5rem;
+}
