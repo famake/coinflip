@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ancient Coin Collection</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>🪙 Ancient Coin Collection</h1>
+        <p>My Personal Collection of Historical Treasures</p>
+    </header>
+
+    <main>
+        <section class="add-coin-section">
+            <button id="toggleFormBtn" class="btn-primary">+ Add New Coin</button>
+            
+            <div id="addCoinForm" class="form-container hidden">
+                <h2>Add a New Coin</h2>
+                <form id="coinForm">
+                    <div class="form-group">
+                        <label for="coinName">Coin Name *</label>
+                        <input type="text" id="coinName" required placeholder="e.g., Roman Denarius">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinDate">Date/Period *</label>
+                        <input type="text" id="coinDate" required placeholder="e.g., 100 BC">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinOrigin">Origin/Mint</label>
+                        <input type="text" id="coinOrigin" placeholder="e.g., Rome">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinRuler">Ruler/Authority</label>
+                        <input type="text" id="coinRuler" placeholder="e.g., Julius Caesar">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinMaterial">Material</label>
+                        <input type="text" id="coinMaterial" placeholder="e.g., Silver">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinWeight">Weight (g)</label>
+                        <input type="text" id="coinWeight" placeholder="e.g., 3.5">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinDiameter">Diameter (mm)</label>
+                        <input type="text" id="coinDiameter" placeholder="e.g., 18">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinDescription">Description</label>
+                        <textarea id="coinDescription" rows="4" placeholder="Describe the coin's features, inscriptions, historical significance..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinObverse">Obverse Description</label>
+                        <input type="text" id="coinObverse" placeholder="Front side details">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinReverse">Reverse Description</label>
+                        <input type="text" id="coinReverse" placeholder="Back side details">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinImages">Coin Images (Front/Back)</label>
+                        <input type="file" id="coinImages" accept="image/*" multiple>
+                        <small>Select one or more images of your coin</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coin3DModel">3D Model (Optional)</label>
+                        <input type="file" id="coin3DModel" accept=".glb,.gltf,.obj">
+                        <small>Upload a 3D model file (.glb, .gltf, or .obj)</small>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">Save Coin</button>
+                        <button type="button" id="cancelBtn" class="btn-secondary">Cancel</button>
+                    </div>
+                </form>
+            </div>
+        </section>
+
+        <section class="coins-section">
+            <div class="filters">
+                <input type="text" id="searchInput" placeholder="Search coins..." class="search-input">
+                <select id="sortSelect" class="sort-select">
+                    <option value="newest">Newest First</option>
+                    <option value="oldest">Oldest First</option>
+                    <option value="name">By Name</option>
+                </select>
+            </div>
+
+            <div id="coinsGrid" class="coins-grid">
+                <!-- Coins will be dynamically added here -->
+            </div>
+
+            <div id="emptyState" class="empty-state">
+                <p>🪙 Your collection is empty. Add your first coin to get started!</p>
+            </div>
+        </section>
+    </main>
+
+    <!-- Modal for viewing coin details -->
+    <div id="coinModal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <div id="modalBody">
+                <!-- Coin details will be populated here -->
+            </div>
+        </div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.159.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.159.0/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>
