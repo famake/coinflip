@@ -95,11 +95,6 @@ EMAIL=your-email@example.com
 - If using www subdomain, create a CNAME record: `www` → `your-domain.com`
 - Wait for DNS propagation (can take 5-60 minutes)
 
-### 5. Make Deploy Script Executable
-
-```bash
-chmod +x deploy.sh
-```
 
 ---
 
