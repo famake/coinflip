@@ -49,13 +49,12 @@ sudo sh get-docker.sh
 # Add your user to docker group (logout/login required after this)
 sudo usermod -aG docker $USER
 
-# Install Docker Compose
-sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-sudo chmod +x /usr/local/bin/docker-compose
+# Install Docker Compose V2 (as a Docker plugin)
+sudo apt install -y docker-compose-v2
 
 # Verify installations
 docker --version
-docker-compose --version
+docker compose version
 
 # Log out and log back in for group changes to take effect
 exit
@@ -175,10 +174,10 @@ cd /opt/coinflip
 mkdir -p swag-config
 
 # Start services for the first time
-docker-compose up -d
+docker compose up -d
 
 # Monitor logs to ensure SSL certificate is obtained
-docker-compose logs -f swag
+docker compose logs -f swag
 
 # Look for: "Server ready" and certificate generation messages
 # Press Ctrl+C to stop following logs
@@ -193,7 +192,7 @@ docker-compose logs -f swag
 
 ```bash
 # Check container status
-docker-compose ps
+docker compose ps
 
 # Both containers should show "Up" and "healthy"
 
@@ -238,7 +237,7 @@ Once the runner is set up, deployments are automatic:
 ### Monitor Deployments
 
 - View deployment logs: GitHub → Actions tab → Select workflow run
-- View container logs: `docker-compose logs -f`
+- View container logs: `docker compose logs -f`
 - Check runner logs: `sudo journalctl -u actions.runner.*.service -f`
 
 ---
@@ -249,19 +248,19 @@ Once the runner is set up, deployments are automatic:
 
 ```bash
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Restart services
-docker-compose restart
+docker compose restart
 
 # Stop services
-docker-compose stop
+docker compose stop
 
 # Start services
-docker-compose start
+docker compose start
 
 # Rebuild and restart
-docker-compose up -d --build
+docker compose up -d --build
 
 # View resource usage
 docker stats
@@ -293,10 +292,10 @@ docker exec swag cat /config/etc/letsencrypt/live/YOUR_DOMAIN/README
 
 # Force certificate renewal (SWAG auto-renews at 30 days remaining)
 docker exec swag certbot renew --force-renewal
-docker-compose restart swag
+docker compose restart swag
 
 # View SWAG logs
-docker-compose logs swag
+docker compose logs swag
 ```
 
 ### Troubleshooting
@@ -312,11 +311,11 @@ nslookup your-domain.com
 sudo ufw status
 
 # View detailed container logs
-docker-compose logs --tail=100 coinflip-app
-docker-compose logs --tail=100 swag
+docker compose logs --tail=100 coinflip-app
+docker compose logs --tail=100 swag
 
 # Restart everything
-docker-compose down && docker-compose up -d
+docker compose down && docker compose up -d
 
 # Check disk space
 df -h
@@ -428,12 +427,12 @@ git push origin main
 cd /opt/coinflip
 
 # Update SWAG
-docker-compose pull swag
-docker-compose up -d swag
+docker compose pull swag
+docker compose up -d swag
 
 # Rebuild app
-docker-compose build --no-cache coinflip-app
-docker-compose up -d coinflip-app
+docker compose build --no-cache coinflip-app
+docker compose up -d coinflip-app
 ```
 
 ### Update Runner
@@ -468,14 +467,14 @@ git reset --hard <previous-commit-hash>
 cd /opt/coinflip
 
 # Stop and remove everything
-docker-compose down -v
+docker compose down -v
 
 # Pull latest code
 git fetch origin
 git reset --hard origin/main
 
 # Start fresh
-docker-compose up -d
+docker compose up -d
 ```
 
 ---
@@ -484,7 +483,7 @@ docker-compose up -d
 
 If you encounter issues:
 
-1. Check logs: `docker-compose logs -f`
+1. Check logs: `docker compose logs -f`
 2. Verify DNS: `nslookup your-domain.com`
 3. Test firewall: `sudo ufw status`
 4. Check runner: `sudo ./svc.sh status` (in actions-runner directory)
@@ -506,16 +505,16 @@ If you encounter issues:
 
 ```bash
 # Start everything
-docker-compose up -d
+docker compose up -d
 
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Restart app only
-docker-compose restart coinflip-app
+docker compose restart coinflip-app
 
 # Full rebuild
-docker-compose down && docker-compose up -d --build
+docker compose down && docker compose up -d --build
 
 # Runner status
 cd /opt/coinflip/actions-runner && sudo ./svc.sh status

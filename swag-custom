@@ -16,8 +16,7 @@ server {
         
         proxy_pass http://coinflip-app:80;
         
-        # WebSocket support (if needed in future)
-        proxy_http_version 1.1;
+        # WebSocket support (proxy.conf already sets proxy_http_version 1.1)
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         

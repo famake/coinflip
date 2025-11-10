@@ -25,7 +25,7 @@ jobs:
       - name: Verify deployment
         run: |
           echo "Checking service health..."
-          docker-compose ps
+          docker compose ps
           
           # Check if app is responding
           max_attempts=10

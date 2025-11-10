@@ -16,10 +16,10 @@ git reset --hard origin/main
 
 # Build and deploy with Docker Compose
 echo "🐳 Building Docker images..."
-docker-compose build --no-cache coinflip-app
+docker compose build --no-cache coinflip-app
 
 echo "🔄 Restarting services..."
-docker-compose up -d
+docker compose up -d
 
 # Wait for health check
 echo "⏳ Waiting for application to be healthy..."
@@ -30,7 +30,7 @@ for i in {1..30}; do
     fi
     if [ $i -eq 30 ]; then
         echo "❌ Application failed to become healthy"
-        docker-compose logs --tail=50 coinflip-app
+        docker compose logs --tail=50 coinflip-app
         exit 1
     fi
     echo "   Attempt $i/30..."
@@ -43,4 +43,4 @@ docker image prune -f
 
 echo "✅ Deployment complete!"
 echo "📊 Service status:"
-docker-compose ps
+docker compose ps
