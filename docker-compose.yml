@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # Main coinflip application
+  coinflip-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coinflip-app
+    restart: unless-stopped
+    networks:
+      - web
+    # Exposed only to internal network, not to host
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # SWAG - Secure Web Application Gateway (nginx + Let's Encrypt)
+  swag:
+    image: linuxserver/swag:latest
+    container_name: swag
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - URL=${DOMAIN}                    # Your domain (e.g., example.com)
+      - SUBDOMAINS=${SUBDOMAINS:-www}    # Subdomains (comma-separated)
+      - VALIDATION=http                  # Validation method (http, dns, etc.)
+      - EMAIL=${EMAIL}                   # Email for Let's Encrypt notifications
+      - ONLY_SUBDOMAINS=false            # Set to true if using only subdomains
+      - STAGING=false                    # Set to true for testing to avoid rate limits
+    volumes:
+      - ./swag-config:/config
+      - ./swag-custom:/config/nginx/site-confs/default.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - web
+    depends_on:
+      - coinflip-app
+
+networks:
+  web:
+    driver: bridge

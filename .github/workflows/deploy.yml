@@ -1,0 +1,53 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: self-hosted  # Uses your self-hosted runner
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          
+      - name: Set permissions
+        run: chmod +x deploy.sh
+        
+      - name: Run deployment script
+        run: ./deploy.sh
+        
+      - name: Verify deployment
+        run: |
+          echo "Checking service health..."
+          docker-compose ps
+          
+          # Check if app is responding
+          max_attempts=10
+          attempt=0
+          until curl -f http://localhost:80 > /dev/null 2>&1 || [ $attempt -eq $max_attempts ]; do
+            attempt=$((attempt + 1))
+            echo "Waiting for app to respond... (attempt $attempt/$max_attempts)"
+            sleep 3
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ Application failed to respond"
+            exit 1
+          fi
+          
+          echo "✅ Deployment verified successfully!"
+          
+      - name: Notification
+        if: always()
+        run: |
+          if [ ${{ job.status }} == 'success' ]; then
+            echo "✅ Deployment succeeded at $(date)"
+          else
+            echo "❌ Deployment failed at $(date)"
+          fi
