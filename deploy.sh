@@ -28,21 +28,33 @@ docker compose build --no-cache coinflip-app
 echo "🔄 Restarting services..."
 docker compose up -d
 
-# Wait for health check
-echo "⏳ Waiting for application to be healthy..."
-for i in {1..30}; do
-    if docker inspect --format='{{.State.Health.Status}}' coinflip-app 2>/dev/null | grep -q "healthy"; then
-        echo "✅ Application is healthy!"
-        break
-    fi
-    if [ $i -eq 30 ]; then
-        echo "❌ Application failed to become healthy"
+# Wait for containers to be running
+echo "⏳ Waiting for containers to start..."
+sleep 5
+
+# Check if containers are running
+if ! docker compose ps | grep -q "coinflip-app.*Up"; then
+    echo "❌ coinflip-app container failed to start"
+    docker compose logs --tail=50 coinflip-app
+    exit 1
+fi
+
+# Test if the app is actually responding
+echo "🔍 Testing application response..."
+max_attempts=10
+attempt=0
+until curl -f http://localhost:80 > /dev/null 2>&1 || [ $attempt -eq $max_attempts ]; do
+    attempt=$((attempt + 1))
+    if [ $attempt -eq $max_attempts ]; then
+        echo "❌ Application not responding on port 80"
         docker compose logs --tail=50 coinflip-app
         exit 1
     fi
-    echo "   Attempt $i/30..."
+    echo "   Attempt $attempt/$max_attempts..."
     sleep 2
 done
+
+echo "✅ Application is responding!"
 
 # Clean up old Docker images to save space
 echo "🧹 Cleaning up old images..."
