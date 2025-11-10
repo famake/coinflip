@@ -6,13 +6,20 @@ set -euo pipefail
 
 echo "🚀 Starting deployment..."
 
-# Navigate to project directory
-cd "$(dirname "$0")"
+# Navigate to project directory (should already be there but ensure it)
+cd /opt/coinflip
 
 # Pull latest changes (should already be done by Actions, but safety check)
 echo "📥 Ensuring latest code..."
 git fetch origin
 git reset --hard origin/main
+
+# Verify .env file exists
+if [ ! -f .env ]; then
+    echo "❌ Error: .env file not found!"
+    echo "Please create .env from .env.example with your domain and email"
+    exit 1
+fi
 
 # Build and deploy with Docker Compose
 echo "🐳 Building Docker images..."

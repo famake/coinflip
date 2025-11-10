@@ -10,11 +10,16 @@ jobs:
   deploy:
     runs-on: self-hosted  # Uses your self-hosted runner
     
+    # Set working directory to the main deployment location
+    defaults:
+      run:
+        working-directory: /opt/coinflip
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          clean: true
+      - name: Pull latest changes
+        run: |
+          git fetch origin
+          git reset --hard origin/main
           
       - name: Set permissions
         run: chmod +x deploy.sh
