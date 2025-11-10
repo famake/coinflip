@@ -17,7 +17,7 @@
             <button id="toggleFormBtn" class="btn-primary">+ Add New Coin</button>
             
             <div id="addCoinForm" class="form-container hidden">
-                <h2>Add a New Coin</h2>
+                <h2 id="formTitle">Add a New Coin</h2>
                 <form id="coinForm">
                     <div class="form-group">
                         <label for="coinName">Coin Name *</label>
@@ -26,22 +26,69 @@
 
                     <div class="form-group">
                         <label for="coinDate">Date/Period *</label>
-                        <input type="text" id="coinDate" required placeholder="e.g., 100 BC">
+                        <div class="nomisma-input-wrap">
+                            <input type="text" id="coinDate" required placeholder="e.g., 100 BC or 'Classical Period'">
+                            <button type="button" id="periodSearchBtn" class="btn-secondary">Search</button>
+                        </div>
+                        <div id="periodSuggest" class="suggest-list" style="display:none;"></div>
+                        <div id="periodChip" class="chip-wrap"></div>
+                        <div class="date-range-row">
+                            <div class="date-range-item">
+                                <label for="dateStartYear">Start</label>
+                                <input type="number" id="dateStartYear" placeholder="e.g. 150" inputmode="numeric">
+                                <select id="dateStartEra" aria-label="Start era">
+                                    <option value="CE">CE</option>
+                                    <option value="BCE">BCE</option>
+                                </select>
+                            </div>
+                            <div class="date-range-item">
+                                <label for="dateEndYear">End</label>
+                                <input type="number" id="dateEndYear" placeholder="e.g. 100" inputmode="numeric">
+                                <select id="dateEndEra" aria-label="End era">
+                                    <option value="CE">CE</option>
+                                    <option value="BCE">BCE</option>
+                                </select>
+                            </div>
+                        </div>
+                        <small>Optional exact range (years). Leave End blank for a single year. BCE years will display as such.</small>
+                        <div id="periodContext" class="period-context" aria-live="polite"></div>
                     </div>
 
                     <div class="form-group">
                         <label for="coinOrigin">Origin/Mint</label>
-                        <input type="text" id="coinOrigin" placeholder="e.g., Rome">
+                        <div class="nomisma-input-wrap">
+                            <input type="text" id="coinOrigin" placeholder="e.g., Rome, Athens, Antioch">
+                            <button type="button" id="originSearchBtn" class="btn-secondary">Search</button>
+                        </div>
+                        <div id="originSuggest" class="suggest-list" style="display:none;"></div>
+                        <div id="originChip" class="chip-wrap"></div>
                     </div>
+
+                    
 
                     <div class="form-group">
                         <label for="coinRuler">Ruler/Authority</label>
-                        <input type="text" id="coinRuler" placeholder="e.g., Julius Caesar">
+                        <div class="nomisma-input-wrap">
+                            <input type="text" id="coinRuler" placeholder="e.g., Gordian III, Maximinus Thrax">
+                            <button type="button" id="rulerSearchBtn" class="btn-secondary">Search</button>
+                        </div>
+                        <div id="rulerSuggest" class="suggest-list" style="display:none;"></div>
+                        <div id="rulerChip" class="chip-wrap"></div>
                     </div>
 
                     <div class="form-group">
                         <label for="coinMaterial">Material</label>
-                        <input type="text" id="coinMaterial" placeholder="e.g., Silver">
+                        <select id="coinMaterialSelect">
+                            <option value="">Select material…</option>
+                            <option value="AR">Silver (AR)</option>
+                            <option value="AV">Gold (AV)</option>
+                            <option value="AE">Bronze (AE)</option>
+                            <option value="EL">Electrum (EL)</option>
+                            <option value="BI">Billon (BI)</option>
+                            <option value="CU">Copper (CU)</option>
+                            <option value="OTHER">Other…</option>
+                        </select>
+                        <input type="text" id="coinMaterialOther" placeholder="Custom material" style="display:none;margin-top:0.5rem;" />
                     </div>
 
                     <div class="form-group">
@@ -57,6 +104,11 @@
                     <div class="form-group">
                         <label for="coinDescription">Description</label>
                         <textarea id="coinDescription" rows="4" placeholder="Describe the coin's features, inscriptions, historical significance..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="coinReferences">References</label>
+                        <input type="text" id="coinReferences" placeholder="e.g., RIC IV 52; Crawford 123/1">
+                        <small>Standard catalog references (RIC, RSC, Sear, BMC, Crawford, OCRE, etc.)</small>
                     </div>
 
                     <div class="form-group">
@@ -81,8 +133,17 @@
                         <small>Upload a 3D model file (.glb, .gltf, or .obj)</small>
                     </div>
 
+                    <div class="form-group">
+                        <label>Enrichment settings</label>
+                        <div class="enrich-settings">
+                            <label class="enrich-opt"><input type="checkbox" id="enrichUseRuler" checked> Use authority for history card</label>
+                            <label class="enrich-opt"><input type="checkbox" id="enrichUseOrigin" checked> Use mint for place card</label>
+                            <label class="enrich-opt"><input type="checkbox" id="enrichUsePeriod" checked> Use period for timeline</label>
+                        </div>
+                    </div>
+
                     <div class="form-actions">
-                        <button type="submit" class="btn-primary">Save Coin</button>
+                        <button id="saveCoinBtn" type="submit" class="btn-primary">Save Coin</button>
                         <button type="button" id="cancelBtn" class="btn-secondary">Cancel</button>
                     </div>
                 </form>
@@ -97,6 +158,15 @@
                     <option value="oldest">Oldest First</option>
                     <option value="name">By Name</option>
                 </select>
+                <div class="actions-wrap">
+                    <button id="actionsBtn" class="btn-secondary" aria-haspopup="true" aria-expanded="false">Actions ▾</button>
+                    <div id="actionsMenu" class="actions-menu" role="menu" style="display:none;">
+                        <button id="toggleSelectionModeBtn" class="menu-item" role="menuitem" aria-pressed="false">Select for Print</button>
+                        <button type="button" id="exportJsonBtn" class="menu-item" role="menuitem">Export JSON</button>
+                        <button type="button" id="importJsonBtn" class="menu-item" role="menuitem">Import JSON</button>
+                        <input type="file" id="importJsonFile" accept="application/json" style="display:none;" />
+                    </div>
+                </div>
             </div>
 
             <div id="coinsGrid" class="coins-grid">
@@ -108,6 +178,49 @@
             </div>
         </section>
     </main>
+
+    <!-- Floating print selection bar -->
+    <div id="printBar" class="print-bar" style="display:none;">
+        <span><strong data-count>0</strong> selected</span>
+        <button id="openPrintTickets" class="btn-primary">Print Tickets</button>
+        <button id="deleteSelected" class="btn-danger">Delete Selected</button>
+        <button id="clearSelection" class="btn-secondary">Clear</button>
+    </div>
+
+    <!-- Tickets Preview Overlay -->
+    <div id="ticketsOverlay" class="tickets-overlay hidden v1-simplified" role="dialog" tabindex="-1">
+                <div class="tickets-panel">
+                        <div class="tickets-toolbar">
+                                <div class="tickets-toolbar-title" style="font-weight:600;color:#2c3e50;display:flex;align-items:center;gap:0.5rem;">
+                                    <span>🖨 Print & Label Preview</span>
+                                </div>
+                                <div class="tickets-controls simplified">
+                                    <div class="tickets-controls-row primary-row" style="gap:1rem;flex-wrap:wrap;">
+                                        <div style="display:flex;flex-direction:column;min-width:200px;">
+                                            <label style="font-size:0.75rem;color:#555;">Preset</label>
+                                            <div style="font-weight:600;">Ticket 100×50 (Fold 5×5)</div>
+                                        </div>
+                                        <div style="display:flex;flex-direction:column;min-width:180px;">
+                                            <label style="font-size:0.75rem;color:#555;">Paper</label>
+                                            <div style="font-weight:500;">A4 210×297 mm</div>
+                                        </div>
+                                        <div class="tickets-actions" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                                            <button id="printTicketsBtn" class="btn-primary">Print</button>
+                                            <button id="exportPdfBtn" class="btn-secondary">Export PDF</button>
+                                            <button id="closeTicketsBtn" class="btn-secondary">Back</button>
+                                        </div>
+                                        <div style="font-size:0.75rem;color:#444;display:flex;align-items:center;gap:0.75rem;">
+                                            <span id="ticketCount">0</span> labels • <span id="pageCount">1</span> page(s)
+                                        </div>
+                                    </div>
+                                </div>
+            </div>
+
+            <div id="ticketsPages" class="tickets-pages simplified">
+                <!-- pages will be rendered here -->
+            </div>
+        </div>
+    </div>
 
     <!-- Modal for viewing coin details -->
     <div id="coinModal" class="modal hidden">
