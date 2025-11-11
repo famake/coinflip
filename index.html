@@ -25,17 +25,11 @@
                     </div>
 
                     <div class="form-group">
-                        <label for="coinDate">Date/Period *</label>
-                        <div class="nomisma-input-wrap">
-                            <input type="text" id="coinDate" required placeholder="e.g., 100 BC or 'Classical Period'">
-                            <button type="button" id="periodSearchBtn" class="btn-secondary">Search</button>
-                        </div>
-                        <div id="periodSuggest" class="suggest-list" style="display:none;"></div>
-                        <div id="periodChip" class="chip-wrap"></div>
+                        <label>Date/Period *</label>
                         <div class="date-range-row">
                             <div class="date-range-item">
                                 <label for="dateStartYear">Start</label>
-                                <input type="number" id="dateStartYear" placeholder="e.g. 150" inputmode="numeric">
+                                <input type="number" id="dateStartYear" placeholder="e.g. 500" inputmode="numeric">
                                 <select id="dateStartEra" aria-label="Start era">
                                     <option value="CE">CE</option>
                                     <option value="BCE">BCE</option>
@@ -43,14 +37,21 @@
                             </div>
                             <div class="date-range-item">
                                 <label for="dateEndYear">End</label>
-                                <input type="number" id="dateEndYear" placeholder="e.g. 100" inputmode="numeric">
+                                <input type="number" id="dateEndYear" placeholder="(optional)" inputmode="numeric">
                                 <select id="dateEndEra" aria-label="End era">
                                     <option value="CE">CE</option>
                                     <option value="BCE">BCE</option>
                                 </select>
                             </div>
+                            <button type="button" id="periodSearchBtn" class="btn-secondary" style="height:2.5rem;">Find Period</button>
                         </div>
-                        <small>Optional exact range (years). Leave End blank for a single year. BCE years will display as such.</small>
+                        <div style="display:flex; gap:1rem; align-items:center; margin-top:0.5rem; flex-wrap:wrap;">
+                            <label style="display:flex; align-items:center; gap:0.4rem;"><input type="checkbox" id="dateApprox"> Approximate (c.)</label>
+                            <small>When Approximate is checked, only the Start year is used and shown (e.g., c. 500 BCE). Click Find Period to load suggestions.</small>
+                        </div>
+                        <input type="hidden" id="coinDate" value="">
+                        <div id="periodSuggest" class="suggest-list" style="display:none;"></div>
+                        <div id="periodChip" class="chip-wrap"></div>
                         <div id="periodContext" class="period-context" aria-live="polite"></div>
                     </div>
 
@@ -89,16 +90,19 @@
                             <option value="OTHER">Other…</option>
                         </select>
                         <input type="text" id="coinMaterialOther" placeholder="Custom material" style="display:none;margin-top:0.5rem;" />
+                        <div id="materialLinkInfo" class="chip-wrap"></div>
                     </div>
 
                     <div class="form-group">
                         <label for="coinWeight">Weight (g)</label>
-                        <input type="text" id="coinWeight" placeholder="e.g., 3.5">
+                        <input type="number" id="coinWeight" placeholder="e.g., 3.5" step="0.01" min="0">
+                        <small id="weightError" class="error-text" style="display:none;">Please enter a valid number (e.g., 3.50).</small>
                     </div>
 
                     <div class="form-group">
                         <label for="coinDiameter">Diameter (mm)</label>
-                        <input type="text" id="coinDiameter" placeholder="e.g., 18">
+                        <input type="number" id="coinDiameter" placeholder="e.g., 18" step="0.1" min="0">
+                        <small id="diameterError" class="error-text" style="display:none;">Please enter a valid number (e.g., 18.0).</small>
                     </div>
 
                     <div class="form-group">
@@ -107,7 +111,11 @@
                     </div>
                     <div class="form-group">
                         <label for="coinReferences">References</label>
-                        <input type="text" id="coinReferences" placeholder="e.g., RIC IV 52; Crawford 123/1">
+                        <div class="nomisma-input-wrap">
+                            <input type="text" id="coinReferences" placeholder="e.g., RIC IV 52; Crawford 123/1">
+                            <button type="button" id="refSearchBtn" class="btn-secondary" aria-haspopup="true" aria-expanded="false">Find refs ▾</button>
+                        </div>
+                        <div id="refSearchMenu" class="actions-menu" role="menu" style="display:none; min-width:260px;"></div>
                         <small>Standard catalog references (RIC, RSC, Sear, BMC, Crawford, OCRE, etc.)</small>
                     </div>
 
@@ -123,8 +131,11 @@
 
                     <div class="form-group">
                         <label for="coinImages">Coin Images (Front/Back)</label>
-                        <input type="file" id="coinImages" accept="image/*" multiple>
-                        <small>Select one or more images of your coin</small>
+                        <div class="nomisma-input-wrap" style="align-items:center; gap:0.5rem;">
+                            <input type="file" id="coinImages" accept="image/*" multiple>
+                            <button type="button" id="clearImagesBtn" class="btn-secondary">Clear</button>
+                        </div>
+                        <small>Preferred format 1:1 (square). Use the highest resolution you have. White or neutral background is OK—viewer will auto-fit.</small>
                     </div>
 
                     <div class="form-group">
@@ -133,14 +144,7 @@
                         <small>Upload a 3D model file (.glb, .gltf, or .obj)</small>
                     </div>
 
-                    <div class="form-group">
-                        <label>Enrichment settings</label>
-                        <div class="enrich-settings">
-                            <label class="enrich-opt"><input type="checkbox" id="enrichUseRuler" checked> Use authority for history card</label>
-                            <label class="enrich-opt"><input type="checkbox" id="enrichUseOrigin" checked> Use mint for place card</label>
-                            <label class="enrich-opt"><input type="checkbox" id="enrichUsePeriod" checked> Use period for timeline</label>
-                        </div>
-                    </div>
+                    
 
                     <div class="form-actions">
                         <button id="saveCoinBtn" type="submit" class="btn-primary">Save Coin</button>
@@ -163,6 +167,7 @@
                     <div id="actionsMenu" class="actions-menu" role="menu" style="display:none;">
                         <button id="toggleSelectionModeBtn" class="menu-item" role="menuitem" aria-pressed="false">Select for Print</button>
                         <button type="button" id="exportJsonBtn" class="menu-item" role="menuitem">Export JSON</button>
+                                <button type="button" id="exportJsonLdBtn" class="menu-item" role="menuitem">Export JSON-LD</button>
                         <button type="button" id="importJsonBtn" class="menu-item" role="menuitem">Import JSON</button>
                         <input type="file" id="importJsonFile" accept="application/json" style="display:none;" />
                     </div>

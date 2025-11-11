@@ -4,28 +4,8 @@ let THREE, GLTFLoader, OBJLoader, OrbitControls, DRACOLoader;
 let jsPDFLib = null, html2canvasLib = null;
 let threeJsAvailable = false;
 
-// Constants
-const PLACEHOLDER_IMAGE = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"%3E%3Crect fill="%23f0f0f0" width="400" height="400"/%3E%3Ctext fill="%23999" font-family="sans-serif" font-size="40" x="50%25" y="50%25" text-anchor="middle" dominant-baseline="middle"%3ENo Image%3C/text%3E%3C/svg%3E';
-const VIEWER_INIT_DELAY = 100; // Delay needed for DOM element to be fully rendered
-
-// Minimal embedded fallback index for common Roman authorities (last-resort when SPARQL is blocked)
-// Only include broadly used slugs; candidates will be verified via JSON-LD before shown.
+// Curated authority fallback list (label -> Nomisma slug)
 const AUTHORITY_FALLBACK = [
-    { label: 'Augustus', slug: 'augustus', aliases: ['octavian'] },
-    { label: 'Tiberius', slug: 'tiberius' },
-    { label: 'Caligula', slug: 'caligula', aliases: ['gaius'] },
-    { label: 'Claudius', slug: 'claudius' },
-    { label: 'Nero', slug: 'nero' },
-    { label: 'Galba', slug: 'galba' },
-    { label: 'Otho', slug: 'otho' },
-    { label: 'Vitellius', slug: 'vitellius' },
-    { label: 'Vespasian', slug: 'vespasian' },
-    { label: 'Titus', slug: 'titus' },
-    { label: 'Domitian', slug: 'domitian' },
-    { label: 'Nerva', slug: 'nerva' },
-    { label: 'Trajan', slug: 'trajan' },
-    { label: 'Hadrian', slug: 'hadrian' },
-    { label: 'Antoninus Pius', slug: 'antoninus_pius' },
     { label: 'Marcus Aurelius', slug: 'marcus_aurelius' },
     { label: 'Lucius Verus', slug: 'lucius_verus' },
     { label: 'Commodus', slug: 'commodus' },
@@ -77,8 +57,17 @@ const PERIOD_FALLBACK = [
     { label: 'Crisis of the Third Century', from: { year: 235, era: 'CE' }, to: { year: 284, era: 'CE' }, slug: 'crisis_of_the_third_century' },
     { label: 'Tetrarchy', from: { year: 284, era: 'CE' }, to: { year: 313, era: 'CE' }, slug: 'tetrarchy' },
     { label: 'Constantinian Period', from: { year: 306, era: 'CE' }, to: { year: 363, era: 'CE' } },
-    { label: 'Late Roman Empire', from: { year: 284, era: 'CE' }, to: { year: 476, era: 'CE' }, slug: 'late_roman_empire' }
+    { label: 'Late Roman Empire', from: { year: 284, era: 'CE' }, to: { year: 476, era: 'CE' }, slug: 'late_roman_empire' },
+    { label: 'Ancient Greece', from: { year: 800, era: 'BCE' }, to: { year: 31, era: 'BCE' } },
+    { label: 'Archaic Greece', from: { year: 800, era: 'BCE' }, to: { year: 480, era: 'BCE' } },
+    { label: 'Classical Greece', from: { year: 480, era: 'BCE' }, to: { year: 323, era: 'BCE' } },
+    { label: 'Peloponnesian War', from: { year: 431, era: 'BCE' }, to: { year: 404, era: 'BCE' } },
+    { label: 'Athenian Empire', from: { year: 454, era: 'BCE' }, to: { year: 404, era: 'BCE' } },
+    { label: 'Hellenistic Period', from: { year: 323, era: 'BCE' }, to: { year: 31, era: 'BCE' } }
 ];
+
+// Cache version (bump when enrichment logic changes)
+const ENRICH_CACHE_VERSION = 1;
 
 // Lightweight IndexedDB asset storage for large files (e.g., 3D models)
 class AssetStorage {
@@ -86,206 +75,31 @@ class AssetStorage {
         this.db = null;
         this.DB_NAME = 'CoinflipDB';
         this.STORE = 'assets';
-        this.VERSION = 1;
-    }
-
-    async init() {
-        if (this.db) return this.db;
-        this.db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open(this.DB_NAME, this.VERSION);
-            request.onupgradeneeded = () => {
-                const db = request.result;
-                if (!db.objectStoreNames.contains(this.STORE)) {
-                    const store = db.createObjectStore(this.STORE, { keyPath: 'id' });
-                    store.createIndex('createdAt', 'createdAt');
-                }
-            };
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-        });
-        return this.db;
-    }
-
-    _txn(mode = 'readonly') {
-        if (!this.db) throw new Error('AssetStorage not initialized');
-        return this.db.transaction(this.STORE, mode).objectStore(this.STORE);
-    }
-
-    _uuid() {
-        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-        return 'id-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-    }
-
-    async add(fileOrBlob, meta = {}) {
-        await this.init();
-        const id = this._uuid();
-        const record = {
-            id,
-            blob: fileOrBlob,
-            filename: meta.filename || fileOrBlob.name || 'asset.bin',
-            type: meta.type || fileOrBlob.type || 'application/octet-stream',
-            size: meta.size || fileOrBlob.size || 0,
-            createdAt: Date.now()
-        };
-        await new Promise((resolve, reject) => {
-            const req = this._txn('readwrite').add(record);
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
-        });
-        return id;
-    }
-
-    async get(id) {
-        await this.init();
-        return await new Promise((resolve, reject) => {
-            const req = this._txn('readonly').get(id);
-            req.onsuccess = () => resolve(req.result || null);
-            req.onerror = () => reject(req.error);
-        });
-    }
-
+        const scored = [];
+        for (const p of PERIOD_FALLBACK) {
+            let score = 0;
+            if (yearStart != null && overlaps(p)) score += 100;
+            if (lc && p.label.toLowerCase().includes(lc)) score += 40;
+            if (/roman empire|principate/.test(p.label.toLowerCase())) score += 10;
+            scored.push({ p, score });
+        }
     async delete(id) {
         await this.init();
         return await new Promise((resolve, reject) => {
             const req = this._txn('readwrite').delete(id);
-            req.onsuccess = () => resolve();
+            req.onsuccess = () => resolve(true);
             req.onerror = () => reject(req.error);
         });
     }
 }
 
-const assetStorage = new AssetStorage();
-
-// Try to load Three.js modules
-async function loadThreeJS() {
-    try {
-        const threeModule = await import('three');
-        THREE = threeModule;
-        
-        const { OrbitControls: OC } = await import('three/addons/controls/OrbitControls.js');
-        OrbitControls = OC;
-        
-        const { GLTFLoader: GL } = await import('three/addons/loaders/GLTFLoader.js');
-        GLTFLoader = GL;
-        
-        const { OBJLoader: OL } = await import('three/addons/loaders/OBJLoader.js');
-        OBJLoader = OL;
-    const { DRACOLoader: DL } = await import('three/addons/loaders/DRACOLoader.js');
-    DRACOLoader = DL;
-        
-        threeJsAvailable = true;
-    } catch (error) {
-        console.warn('Three.js not available, 3D viewer will use fallback mode');
-        threeJsAvailable = false;
-    }
-}
-
-// Lazy-load PDF export libs (UMD builds via script tags for wide compatibility)
-async function loadPdfLibs() {
-    if (jsPDFLib && html2canvasLib) return;
-    const loadScript = (src) => new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = src;
-        s.async = true;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error('Failed to load ' + src));
-        document.head.appendChild(s);
-    });
-    // Use widely cached UMD builds
-    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
-    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
-    jsPDFLib = (window.jspdf && window.jspdf.jsPDF) ? window.jspdf.jsPDF : (window.jsPDF || null);
-    html2canvasLib = window.html2canvas || null;
-    if (!jsPDFLib || !html2canvasLib) throw new Error('PDF libraries not available');
-}
-
+// Main application class (wraps previously top-level methods)
 class CoinCollection {
     constructor() {
-        this.coins = this.loadCoins();
+        this.coins = [];
+        this.editingCoinId = null;
+        this.selectedForPrint = new Set();
         this.currentViewer = null;
-    this.selectedForPrint = new Set(JSON.parse(localStorage.getItem('selectedForPrint') || '[]'));
-        this.editingCoinId = null; // when set, form updates existing coin
-        // Simple in-memory cache for enrichment fetches (resets on reload)
-        this._enrichCache = new Map();
-        this.initEventListeners();
-        this.renderCoins();
-    }
-
-    // Load coins from localStorage
-    loadCoins() {
-        const saved = localStorage.getItem('coinCollection');
-        return saved ? JSON.parse(saved) : [];
-    }
-
-    // ---------- Enrichment Helpers ----------
-    // Try to discover a Nomisma ID/URL from free text
-    _extractNomismaFromText(text) {
-        if (!text) return null;
-        const m = String(text).match(/https?:\/\/nomisma\.org\/id\/([a-z0-9\-]+)/i);
-        return m ? `https://nomisma.org/id/${m[1].toLowerCase()}` : null;
-    }
-    // Build contextual search URLs (no network) for quick external lookups
-    buildSearchLinks(coin) {
-        const nameParts = [coin.name, coin.ruler, coin.origin].filter(Boolean).join(' ');
-        const q = encodeURIComponent(nameParts.trim() || coin.name || '');
-        const links = {
-            nomisma: coin.external_ids?.nomisma ? this._normalizeNomismaUrl(coin.external_ids.nomisma) : (q ? `https://nomisma.org/search/?q=${q}` : null),
-            wikidata: coin.external_ids?.wikidata ? this._normalizeWikidataUrl(coin.external_ids.wikidata) : (q ? `https://www.wikidata.org/w/index.php?search=${q}` : null)
-        };
-        return links;
-    }
-
-    _normalizeNomismaUrl(id) {
-        if (!id) return null;
-        const s = String(id).trim();
-        if (/^https?:/i.test(s)) {
-            // Normalize to HTTPS to avoid mixed-content in secure contexts
-            const noFrag = s.split('#')[0].replace(/\.(json|jsonld)$/i, '');
-            return noFrag.replace(/^http:/i, 'https:');
-        }
-        const base = s.replace(/\.(json|jsonld)$/i, '');
-        return `https://nomisma.org/id/${base}`;
-    }
-    _normalizeWikidataUrl(id) {
-        if (!id) return null;
-        if (/^https?:/i.test(id)) return id;
-        return `https://www.wikidata.org/wiki/${id}`;
-    }
-    // Removed Pleiades/OCRE normalization (simplified scope)
-
-    // Enrich coin: currently builds search URLs and optionally derives basic snapshot facts
-    async enrichCoin(id, { force = false, linksOnly = false } = {}) {
-        const coin = this.coins.find(c => c.id === id);
-        if (!coin) return;
-        coin.external_ids = coin.external_ids || { nomisma: null, wikidata: null, searchUrls: null };
-        // Auto-detect Nomisma from references/description if not set
-        if (!coin.external_ids.nomisma) {
-            const fromRefs = this._extractNomismaFromText(coin.references);
-            const fromDesc = this._extractNomismaFromText(coin.description);
-            coin.external_ids.nomisma = fromRefs || fromDesc || null;
-        }
-        // Build basic search links for optional usage; not shown in simplified UI
-        const cacheKey = `links:${id}:${coin.name}:${coin.ruler}:${coin.origin}`;
-        if (force || !this._enrichCache.has(cacheKey)) {
-            const links = this.buildSearchLinks(coin);
-            coin.external_ids.searchUrls = links;
-            this._enrichCache.set(cacheKey, links);
-        }
-        if (!linksOnly) {
-            // Perform external lookups (Nomisma via ID or search, Wikidata via search + entity fetch + Wikipedia summary)
-            try {
-                const snapshot = await this._fetchExternalEnrichment(coin);
-                if (snapshot) {
-                    coin.facts_snapshot = snapshot;
-                    coin.enrichment_status = 'snapshot';
-                    coin.enrichment_fetched_at = new Date().toISOString();
-                }
-            } catch (e) {
-                console.warn('Enrichment fetch failed:', e);
-                coin.enrichment_status = 'error';
-            }
-        }
-        this.saveCoins();
     }
 
     // Period fallback: overlap match between user year(s) and curated ranges. If user types label text, also fuzzy match.
@@ -330,44 +144,46 @@ class CoinCollection {
         };
         const scored = [];
         for (const p of PERIOD_FALLBACK) {
-            let score = 0;
-            if (yearStart != null && overlaps(p)) score += 100;
-            if (lc && p.label.toLowerCase().includes(lc)) score += 40;
-            // Slight boost for macro umbrella periods to appear alongside dynasties
-            if (/roman empire|principate/.test(p.label.toLowerCase())) score += 10;
-            scored.push({ p, score });
-        }
-        scored.sort((a,b)=> b.score - a.score);
-        // Always try to include top macro umbrella if overlapped
-        const overlapped = scored.filter(x=> x.score>0);
-        let picks = overlapped.slice(0, limit);
-        const macro = overlapped.find(x=> /roman empire/.test(x.p.label.toLowerCase()));
-        if (macro && !picks.includes(macro)) {
-            picks = [macro, ...picks.filter(x=> x!==macro)].slice(0, limit);
-        }
-        const out = [];
-        for (const {p} of picks) {
-            if (p.slug) {
-                try {
-                    const info = await this._enrichNomisma(`https://nomisma.org/id/${p.slug}`);
-                    if (info) {
-                        out.push({ id: info.uri, label: info.label || p.label, qid: info.wikidata || null });
-                        continue;
-                    }
-                } catch(_){}
-            }
-            out.push({ id: p.label, label: p.label, labelOnly: true });
-        }
-        return out;
-    }
-
-    async refreshSnapshot(id) {
-        // For now, just rebuild local snapshot (future: external fetches)
-        return this.enrichCoin(id, { force: true, linksOnly: false });
-    }
+                    
+                        const snap = (this.coins.find(x=>x.id===coin.id)?.facts_snapshot) || null;
+                        const pinfo = snap && snap.period_info;
+                        const nmUri = (typeof coin.date==='object' && coin.date.nomisma_uri) ? this._normalizeNomismaUrl(coin.date.nomisma_uri) : (snap?.nomisma_period?.uri || null);
+                        const thumbSrc = pinfo?.wikipedia?.thumbnail?.source || null;
+                        const avatar = thumbSrc ? `<img class="ruler-avatar" src="${this.escapeHtml(thumbSrc)}" alt="${this.escapeHtml(pinfo?.label||'')}">` : '<div class="skeleton sk-avatar"></div>';
+                        const fallbackLabel = (typeof coin.date==='object' ? (coin.date.label || '') : '') || (snap?.nomisma_period?.label || '');
+                        const label = this.escapeHtml(pinfo?.label || fallbackLabel || '—');
+                        let descRaw = pinfo?.description || (pinfo?.wikipedia?.extract) || (snap?.nomisma_period?.definition) || '';
+                        if (/video game/i.test(String(descRaw))) { descRaw = snap?.nomisma_period?.definition || ''; }
+                        const desc = this.escapeHtml(descRaw || '');
+                        const wikiUrl = pinfo?.wikipedia?.content_urls?.desktop?.page || pinfo?.wikipedia?.content_urls?.mobile?.page || null;
+                        const wdUrl = pinfo?.qid ? `https://www.wikidata.org/wiki/${pinfo.qid}` : null;
+                        // Show selected exact date range
+                        const exact = (typeof coin.date==='object') ? (coin.date.exact || null) : null;
+                        const years = exact ? this.escapeHtml((() => {
+                            const fy = exact.from?.year, fe = exact.from?.era || 'CE';
+                            const ty = exact.to?.year, te = exact.to?.era || 'CE';
+                            const approx = exact.approx ? 'c. ' : '';
+                            if (fy && ty) return `${approx}${fy} – ${ty} ${fe===te?fe:(fe+' / '+te)}`;
+                            if (fy) return `${approx}${fy} ${fe}`;
+                            if (ty) return `${approx}${ty} ${te}`;
+                            return '';
+                        })()) : '';
+                        const wikiBtn = wikiUrl ? `<a class="btn-link" href="${this.escapeHtml(wikiUrl)}" target="_blank" rel="noopener">🌐 Wikipedia</a>` : '';
+                        const wdBtn = wdUrl ? `<a class="btn-link" href="${this.escapeHtml(wdUrl)}" target="_blank" rel="noopener">🗄️ Wikidata</a>` : '';
+                        const nmBtn = nmUri ? `<a class="btn-link" href="${this.escapeHtml(nmUri)}" target="_blank" rel="noopener">🔗 Nomisma</a>` : '';
+                        if (!label && !desc && !wikiBtn && !wdBtn && !nmBtn) return '';
+                        console.debug('Period enrichment', {
+                            nomismaId: nmUri,
+                            wikidata: pinfo?.qid || (snap?.nomisma_period?.wikidata) || null,
+                            wikipedia: pinfo?.wikipedia?.title || null,
+                            fromNomismaExactMatch: !!pinfo?.fromNomismaExactMatch
+                        });
+                        // Removed stray period-card injection (handled later in viewCoin modal template)
+                        return '';
+                    
 
     // LocalStorage TTL cache helpers
-    _cacheKey(key) { return `enrichCache:${key}`; }
+    _cacheKey(key) { return `enrichCache:v${ENRICH_CACHE_VERSION}:${key}`; }
     setCache(key, value, ttlMs = 1000 * 60 * 60 * 24) { // default 24h
         try {
             const rec = { v: value, exp: Date.now() + ttlMs };
@@ -382,6 +198,26 @@ class CoinCollection {
             if (Date.now() > rec.exp) { localStorage.removeItem(this._cacheKey(key)); return null; }
             return rec.v;
         } catch (_) { return null; }
+    }
+
+    _normalizeNomismaUrl(idOrUrl) {
+        if (!idOrUrl) return null;
+        let s = String(idOrUrl).trim();
+        // Accept nm:slug compact form
+        const mNm = s.match(/^nm:(.+)$/i);
+        if (mNm) s = `https://nomisma.org/id/${mNm[1]}`;
+        // Extract slug if full URL
+        const mFull = s.match(/^https?:\/\/nomisma\.org\/id\/([^#?]+)$/i) || s.match(/^https?:\/\/nomisma\.org\/id\/([^#?]+)\.jsonld$/i);
+        let slug = null;
+        if (mFull) {
+            slug = mFull[1];
+        } else if (!/^https?:/i.test(s)) {
+            // treat as slug
+            slug = s.replace(/^\/+/, '');
+        }
+        if (!slug) return null;
+        slug = slug.replace(/\.jsonld$/i, '').replace(/\/$/, '');
+        return `https://nomisma.org/id/${slug}`;
     }
 
     async _fetchExternalEnrichment(coin) {
@@ -399,8 +235,6 @@ class CoinCollection {
             updatedLocal: new Date().toISOString()
         };
 
-        const opts = coin.enrichment_opts || { ruler: true, origin: true, date: true };
-        
         // Enrich per-field Nomisma URIs if present
         let qidFromNomismaAuthority = null;
         let qidFromNomismaMint = null;
@@ -430,25 +264,34 @@ class CoinCollection {
         if (nomismaTasks.length) { try { await Promise.all(nomismaTasks); } catch(_){}
         }
 
-        // Wikidata enrichment for authority (only if QID is sourced from Nomisma)
-        const qidAuthority = (typeof coin.ruler === 'object' && coin.ruler.wikidata_qid) || qidFromNomismaAuthority || null;
-        if (opts.ruler && qidAuthority) {
+        // Wikidata enrichment for authority (strictly if QID is sourced from Nomisma exactMatch only)
+        const qidAuthority = qidFromNomismaAuthority || null;
+        if ((typeof coin.ruler === 'object' && coin.ruler.wikidata_qid) && coin.ruler.wikidata_qid !== qidAuthority) {
+            console.warn('Blocked enrichment: QID not sourced from Nomisma exactMatch for ruler', { provided: coin.ruler.wikidata_qid, nomisma: qidAuthority });
+        }
+        if (qidAuthority) {
             try {
                 const authInfo = await this._enrichWikidataEntity(qidAuthority, 'authority');
                 if (authInfo) snapshot.authority_info = authInfo;
             } catch (e) { console.debug('Authority enrichment failed', e); }
         }
         // Mint enrichment (only if QID from Nomisma)
-        const qidMint = (typeof coin.origin === 'object' && coin.origin.wikidata_qid) || qidFromNomismaMint || null;
-        if (opts.origin && qidMint) {
+        const qidMint = qidFromNomismaMint || null;
+        if ((typeof coin.origin === 'object' && coin.origin.wikidata_qid) && coin.origin.wikidata_qid !== qidMint) {
+            console.warn('Blocked enrichment: QID not sourced from Nomisma exactMatch for mint', { provided: coin.origin.wikidata_qid, nomisma: qidMint });
+        }
+        if (qidMint) {
             try {
                 const mintInfo = await this._enrichWikidataEntity(qidMint, 'mint');
                 if (mintInfo) snapshot.mint_info = mintInfo;
             } catch (e) { console.debug('Mint enrichment failed', e); }
         }
         // Period enrichment (only if QID from Nomisma)
-        const qidPeriod = (typeof coin.date === 'object' && coin.date.wikidata_qid) || qidFromNomismaPeriod || null;
-        if (opts.date && qidPeriod) {
+        const qidPeriod = qidFromNomismaPeriod || null;
+        if ((typeof coin.date === 'object' && coin.date.wikidata_qid) && coin.date.wikidata_qid !== qidPeriod) {
+            console.warn('Blocked enrichment: QID not sourced from Nomisma exactMatch for period', { provided: coin.date.wikidata_qid, nomisma: qidPeriod });
+        }
+        if (qidPeriod) {
             try {
                 const periodInfo = await this._enrichWikidataEntity(qidPeriod, 'period');
                 if (periodInfo) snapshot.period_info = periodInfo;
@@ -462,70 +305,25 @@ class CoinCollection {
         if (!normalized) return null;
         const cacheHit = this.getCache(`wikidata:${normalized}`);
         if (cacheHit) return cacheHit;
-        // Step 1: if input is QID, skip search
+        // Strict gating: only accept direct QID input (from Nomisma exactMatch) or a wikidata entity URL
         let qid = null, label = null, description = null;
+        const mUrl = normalized.match(/wikidata\.org\/(?:entity|wiki)\/(Q\d+)/i);
         if (/^Q\d+$/i.test(normalized)) {
             qid = normalized.toUpperCase();
+        } else if (mUrl) {
+            qid = mUrl[1].toUpperCase();
         } else {
-            try {
-                const searchUrl = `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(normalized)}&language=en&limit=5&format=json&origin=*`;
-                const res = await this._fetchWithTimeout(searchUrl, { timeout: 12000 });
-                const data = await res.json();
-                if (data.search && data.search.length > 0) {
-                    // Rank candidates using P31 classes and description keywords
-                    const candidates = data.search.slice(0, 5);
-                    const scored = [];
-                    for (const hit of candidates) {
-                        const eid = hit.id;
-                        let score = 0;
-                        // quick keyword filtering from description
-                        const desc = (hit.description || '').toLowerCase();
-                        if (/ship|vessel|album|song|novel|film|company|magazine|newspaper/.test(desc)) score -= 100;
-                        // fetch entity to inspect P31
-                        try {
-                            const entRes = await this._fetchWithTimeout(`https://www.wikidata.org/wiki/Special:EntityData/${eid}.json`, { timeout: 12000 });
-                            const ed = await entRes.json();
-                            const ent = ed.entities && ed.entities[eid];
-                            const p31 = ent && ent.claims && ent.claims.P31 ? ent.claims.P31.map(c => c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value && c.mainsnak.datavalue.value.id).filter(Boolean) : [];
-                            const has = (q) => p31.includes(q);
-                            // Scoring by kind
-                            if (kind === 'authority') {
-                                if (has('Q5')) score += 100; // human
-                                if (has('Q5119')) score += 80; // city-state
-                                if (has('Q6256')) score += 70; // country/state
-                                if (has('Q43229')) score += 60; // organization
-                                if (has('Q11446')) score -= 200; // ship
-                            } else if (kind === 'mint') {
-                                if (has('Q515')) score += 100; // city
-                                if (has('Q1637706')) score += 90; // ancient city
-                                if (has('Q15284')) score += 85; // polis
-                                if (has('Q11446')) score -= 200; // ship
-                                if (has('Q5')) score -= 50; // human (unlikely for mint)
-                            } else if (kind === 'period') {
-                                if (has('Q11514315')) score += 100; // historical period
-                                if (has('Q577')) score += 60; // year
-                                if (has('Q577') && /bc|ad|bce|ce|century|period/.test(desc)) score += 20;
-                            }
-                            // prefer exact label matches
-                            if (hit.label && hit.label.toLowerCase() === normalized.toLowerCase()) score += 10;
-                            scored.push({ hit, score, ent });
-                        } catch (_) { scored.push({ hit, score, ent: null }); }
-                    }
-                    scored.sort((a,b)=> b.score - a.score);
-                    if (scored.length > 0) {
-                        const top = scored[0];
-                        qid = top.hit.id; label = top.hit.label; description = top.hit.description;
-                    }
-                }
-            } catch (e) { console.debug('Wikidata search error', e); }
+            console.warn('Blocked Wikidata lookup without Nomisma-derived QID:', normalized);
+            return null;
         }
-        if (!qid) return null;
         // Step 2: fetch entity claims + site links
         let wikipedia = null;
+        let lastEntityJson = null;
         try {
             const entityUrl = `https://www.wikidata.org/wiki/Special:EntityData/${qid}.json`; // CORS OK
             const res = await this._fetchWithTimeout(entityUrl, { timeout: 12000 });
             const data = await res.json();
+            lastEntityJson = data;
             const ent = data.entities && data.entities[qid];
             if (ent && ent.sitelinks && ent.sitelinks.enwiki) {
                 wikipedia = await this._fetchWikipediaSummary(ent.sitelinks.enwiki.title);
@@ -533,9 +331,72 @@ class CoinCollection {
             if (!label && ent && ent.labels && ent.labels.en) label = ent.labels.en.value;
             if (!description && ent && ent.descriptions && ent.descriptions.en) description = ent.descriptions.en.value;
         } catch (e) { console.debug('Entity fetch error', e); }
-        const info = { qid, label, description, wikipedia };
+    const info = { qid, label, description, wikipedia, fromNomismaExactMatch: true };
+        // Parse lightweight claims (reign years, basic relationships) from entity JSON
+        try {
+            if (lastEntityJson && lastEntityJson.entities && lastEntityJson.entities[qid]) {
+                const ent = lastEntityJson.entities[qid];
+                info.claims_parsed = this._parseWikidataClaims(ent, kind);
+            }
+        } catch (_) { /* non-critical */ }
         this.setCache(`wikidata:${normalized}`, info); // cache enriched info
         return info;
+    }
+
+    // Extract useful structured facts from Wikidata entity claims without extra network requests
+    _parseWikidataClaims(ent, kind) {
+        if (!ent || !ent.claims) return null;
+        const claims = ent.claims;
+        const out = {};
+        // Helper to parse a Wikidata time string to year + era
+        const parseTimeYear = (t) => {
+            if (!t || typeof t !== 'string') return null;
+            const m = t.match(/^[+-]?(\d{1,4})-/); // +0123-00-00T..
+            if (!m) return null;
+            let year = parseInt(m[1], 10);
+            // Wikidata uses proleptic Gregorian; years before 0 -> BCE
+            const era = (t.startsWith('-')) ? 'BCE' : 'CE';
+            return { year, era };
+        };
+        // Reign: scan P39 (position held) qualifiers P580 (start), P582 (end) filtered to Roman emperor (Q842606)
+        if (claims.P39) {
+            let earliest = null, latest = null;
+            for (const c of claims.P39) {
+                const posSnak = c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value && c.mainsnak.datavalue.value.id;
+                if (posSnak && posSnak !== 'Q842606') continue; // Only Roman emperor
+                const qs = c.qualifiers || {};
+                const startSnaks = qs.P580 || [];
+                const endSnaks = qs.P582 || [];
+                const start = startSnaks[0] && startSnaks[0].datavalue && startSnaks[0].datavalue.value && startSnaks[0].datavalue.value.time;
+                const end = endSnaks[0] && endSnaks[0].datavalue && endSnaks[0].datavalue.value && endSnaks[0].datavalue.value.time;
+                const startY = parseTimeYear(start);
+                const endY = parseTimeYear(end);
+                if (startY) {
+                    if (!earliest || startY.year < earliest.year || (startY.era === 'BCE' && earliest.era === 'CE')) earliest = startY;
+                }
+                if (endY) {
+                    if (!latest || endY.year > latest.year || (endY.era === 'CE' && latest.era === 'BCE')) latest = endY;
+                }
+            }
+            if (earliest || latest) {
+                out.reign = { start: earliest || null, end: latest || null };
+            }
+        }
+        // Parents: father (P22), mother (P25) - store QIDs only to honor gating
+        const father = (claims.P22 && claims.P22[0] && claims.P22[0].mainsnak && claims.P22[0].mainsnak.datavalue && claims.P22[0].mainsnak.datavalue.value && claims.P22[0].mainsnak.datavalue.value.id) || null;
+        const mother = (claims.P25 && claims.P25[0] && claims.P25[0].mainsnak && claims.P25[0].mainsnak.datavalue && claims.P25[0].mainsnak.datavalue.value && claims.P25[0].mainsnak.datavalue.value.id) || null;
+        if (father || mother) out.parents = { father, mother };
+        // Spouse(s) P26
+        if (claims.P26) {
+            out.spouses = claims.P26.map(c => c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value && c.mainsnak.datavalue.value.id).filter(Boolean);
+            if (!out.spouses.length) delete out.spouses;
+        }
+        // Dynasty / family P53
+        if (claims.P53) {
+            out.dynasties = claims.P53.map(c => c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value && c.mainsnak.datavalue.value.id).filter(Boolean);
+            if (!out.dynasties.length) delete out.dynasties;
+        }
+        return Object.keys(out).length ? out : null;
     }
 
     async _enrichNomisma(idOrUrl) {
@@ -565,10 +426,34 @@ class CoinCollection {
             } catch (_) { /* try next */ }
         }
         if (!data) return null;
-        // JSON-LD graph; find node matching @id
-    const graph = Array.isArray(data['@graph']) ? data['@graph'] : [data];
-    const node = graph.find(n => n['@id'] === baseUrl || n['@id'] === finalUrl) || graph[0];
+        // JSON-LD graph; find the primary concept node robustly (handle nm: prefix, http vs https, exclude fragments)
+        const graph = Array.isArray(data['@graph']) ? data['@graph'] : [data];
+        const slug = baseUrl.split('/').pop();
+        const isPrimaryType = (n) => {
+            const t = n['@type'];
+            const arr = Array.isArray(t) ? t : (t ? [t] : []);
+            return arr.some(x => String(x).includes('skos#Concept') || String(x).includes('skos:Concept') || String(x).includes('foaf/0.1/Person') || String(x).includes('foaf:Person') || String(x).includes('nomisma.org/ontology#'));
+        };
+        const idMatches = (id) => {
+            if (!id) return false;
+            if (typeof id !== 'string') return false;
+            const idBase = id.split('#')[0]; // allow #this fragments
+            if (idBase === baseUrl) return true;
+            const httpId = baseUrl.replace(/^https:/i, 'http:');
+            if (idBase === httpId) return true;
+            if (idBase === `http://nomisma.org/id/${slug}` || idBase === `https://nomisma.org/id/${slug}`) return true;
+            if (idBase === `nm:${slug}`) return true;
+            return idBase.endsWith(`/${slug}`) || idBase.endsWith(`:${slug}`);
+        };
+        let node = graph.find(n => idMatches(n['@id']) && isPrimaryType(n));
+        if (!node) node = graph.find(n => idMatches(n['@id']));
+        if (!node) node = graph.find(n => (n['@id'] || '').includes(slug) && !(n['@id'] || '').includes('#'));
+        if (!node) node = graph[0];
         if (!node) return null;
+        const pickProp = (obj, keys) => {
+            for (const k of keys) { if (obj && obj[k] != null) return obj[k]; }
+            return null;
+        };
         const getEn = (v) => {
             if (!v) return null;
             if (Array.isArray(v)) {
@@ -584,19 +469,41 @@ class CoinCollection {
             const n = parseFloat(String(v));
             return isNaN(n) ? null : n;
         };
-        const label = getEn(node['http://www.w3.org/2004/02/skos/core#prefLabel']) || getEn(node['label']) || null;
-        const definition = getEn(node['http://www.w3.org/2004/02/skos/core#definition']) || getEn(node['http://www.w3.org/2004/02/skos/core#scopeNote']) || null;
+        // Accept both expanded and compacted JSON-LD keys
+        const label = getEn(pickProp(node, ['http://www.w3.org/2004/02/skos/core#prefLabel','skos:prefLabel','label'])) || null;
+        const definition = getEn(pickProp(node, ['http://www.w3.org/2004/02/skos/core#definition','skos:definition','http://www.w3.org/2004/02/skos/core#scopeNote','skos:scopeNote'])) || null;
         let wikidata = null;
-        const exact = node['http://www.w3.org/2004/02/skos/core#exactMatch'] || node['exactMatch'];
-        const exactArr = Array.isArray(exact) ? exact : (exact ? [exact] : []);
-        for (const em of exactArr) {
-            const val = (typeof em === 'string') ? em : (em['@id'] || em['@value'] || '');
-            const m = val.match(/wikidata\.org\/entity\/(Q\d+)/i);
-            if (m) { wikidata = m[1].toUpperCase(); break; }
+        const exactRaw = pickProp(node, ['http://www.w3.org/2004/02/skos/core#exactMatch','skos:exactMatch','exactMatch']);
+        const exactArr = Array.isArray(exactRaw) ? exactRaw : (exactRaw ? [exactRaw] : []);
+        const rawExactMatches = exactArr.map(em => (typeof em === 'string') ? em : (em && (em['@id'] || em['@value']) || null)).filter(Boolean);
+        let chosenUrl = null;
+        for (const val of rawExactMatches) {
+            const s = String(val);
+            // Accept /entity/Qxxx, /wiki/Qxxx, with optional fragments/query
+            const m = s.match(/wikidata\.org\/(?:entity|wiki)\/?(Q\d+)/i) || s.match(/\b(Q\d+)\b/);
+            if (m && m[1]) { wikidata = m[1].toUpperCase(); chosenUrl = s.replace(/^http:/i,'https:'); break; }
         }
+        // Fallback: scan entire graph for any exactMatch pointing to a Wikidata QID
+        if (!wikidata) {
+            try {
+                for (const n of graph) {
+                    const emRaw = n['http://www.w3.org/2004/02/skos/core#exactMatch'] || n['skos:exactMatch'] || n['exactMatch'] || [];
+                    const arr = Array.isArray(emRaw) ? emRaw : [emRaw];
+                    for (const em of arr) {
+                        const v = typeof em === 'string' ? em : (em && (em['@id'] || em['@value']) || '');
+                        const s = String(v);
+                        const m = s.match(/wikidata\.org\/(?:entity|wiki)\/?(Q\d+)/i) || s.match(/\b(Q\d+)\b/);
+                        if (m && m[1]) { wikidata = m[1].toUpperCase(); chosenUrl = s.replace(/^http:/i,'https:'); break; }
+                    }
+                    if (wikidata) break;
+                }
+            } catch(_) {}
+        }
+        // Debug exactMatch scan (include chosenUrl)
+        try { console.debug('Nomisma exactMatch scan', { nomismaId: baseUrl, nodeId: node['@id'], exactMatches: rawExactMatches, chosenUrl, chosenQid: wikidata }); } catch(_){}
         // Coordinates (common in Nomisma with WGS84)
-        const lat = getNum(node['http://www.w3.org/2003/01/geo/wgs84_pos#lat']) || getNum(node['geo:lat']) || null;
-        const lon = getNum(node['http://www.w3.org/2003/01/geo/wgs84_pos#long']) || getNum(node['geo:long']) || null;
+        const lat = getNum(pickProp(node, ['http://www.w3.org/2003/01/geo/wgs84_pos#lat','geo:lat'])) || null;
+        const lon = getNum(pickProp(node, ['http://www.w3.org/2003/01/geo/wgs84_pos#long','geo:long'])) || null;
         const info = { uri: baseUrl, label, definition, wikidata, coordinates: (lat != null && lon != null) ? { lat, lon } : null };
         this.setCache(`nomisma:${baseUrl}`, info);
         return info;
@@ -609,6 +516,24 @@ class CoinCollection {
             if (!res.ok) return null;
             return await res.json();
         } catch (_) { return null; }
+    }
+
+    // Lightweight labels lookup for Wikidata QIDs (English)
+    async _fetchWikidataLabels(qids = []) {
+        const ids = Array.from(new Set(qids.filter(Boolean)));
+        if (!ids.length) return {};
+        try {
+            const url = `https://www.wikidata.org/w/api.php?action=wbgetentities&props=labels&languages=en&ids=${encodeURIComponent(ids.join('|'))}&format=json&origin=*`;
+            const res = await this._fetchWithTimeout(url, { timeout: 12000 });
+            const data = await res.json();
+            const out = {};
+            const entities = data.entities || {};
+            Object.keys(entities).forEach(q => {
+                const lbl = entities[q]?.labels?.en?.value || null;
+                if (lbl) out[q] = lbl;
+            });
+            return out;
+        } catch (_) { return {}; }
     }
 
     async _fetchWithTimeout(url, { timeout = 10000, retries = 1, init = {} } = {}) {
@@ -644,9 +569,16 @@ class CoinCollection {
 
     // Initialize event listeners
     initEventListeners() {
-        // Toggle form visibility
+        // Toggle form visibility; if opening and not editing, reset to a clean add form
         document.getElementById('toggleFormBtn').addEventListener('click', () => {
-            document.getElementById('addCoinForm').classList.toggle('hidden');
+            const formWrap = document.getElementById('addCoinForm');
+            const willShow = formWrap.classList.contains('hidden');
+            formWrap.classList.toggle('hidden');
+            if (willShow && !this.editingCoinId) {
+                this.resetFormToAddMode();
+                // Show again after reset collapsed it
+                document.getElementById('addCoinForm').classList.remove('hidden');
+            }
         });
 
         // Form submission
@@ -654,6 +586,15 @@ class CoinCollection {
             e.preventDefault();
             this.addCoin();
         });
+
+        // Clear images button
+        const clearImagesBtn = document.getElementById('clearImagesBtn');
+        if (clearImagesBtn) {
+            clearImagesBtn.addEventListener('click', () => {
+                const imgInput = document.getElementById('coinImages');
+                if (imgInput) imgInput.value = '';
+            });
+        }
 
         // Scoped Nomisma search events for Origin/Mint, Ruler/Authority, Period
         this._initScopedNomisma('origin', {
@@ -678,14 +619,35 @@ class CoinCollection {
             types: ['period']
         });
 
-        // Material dropdown logic
+        // Material dropdown logic + link indicator
         const matSel = document.getElementById('coinMaterialSelect');
         const matOther = document.getElementById('coinMaterialOther');
         if (matSel && matOther) {
             matSel.addEventListener('change', () => {
                 matOther.style.display = matSel.value === 'OTHER' ? 'block' : 'none';
+                this._updateMaterialLinkInfo();
             });
+            matOther.addEventListener('input', () => this._updateMaterialLinkInfo());
+            // initial state
+            this._updateMaterialLinkInfo();
         }
+
+        // Numeric validation for weight/diameter
+        const weightEl = document.getElementById('coinWeight');
+        const weightErr = document.getElementById('weightError');
+        const diamEl = document.getElementById('coinDiameter');
+        const diamErr = document.getElementById('diameterError');
+        const validateNumber = (el, errEl) => {
+            if (!el) return true;
+            const v = el.value.trim();
+            if (!v) { if (errEl) errEl.style.display = 'none'; return true; }
+            const n = Number(v.replace(',', '.'));
+            const ok = Number.isFinite(n) && n >= 0;
+            if (errEl) errEl.style.display = ok ? 'none' : 'block';
+            return ok;
+        };
+        weightEl?.addEventListener('input', () => validateNumber(weightEl, weightErr));
+        diamEl?.addEventListener('input', () => validateNumber(diamEl, diamErr));
 
         // Global click: dismiss any open suggestions when clicking outside
         document.addEventListener('click', (e) => {
@@ -698,6 +660,13 @@ class CoinCollection {
                 const clickedInside = box.contains(e.target) || input.contains?.(e.target) || btn.contains?.(e.target) || (e.target===input) || (e.target===btn);
                 if (!clickedInside) box.style.display = 'none';
             });
+            // Close ref search menu if clicking outside
+            const refBtn = document.getElementById('refSearchBtn');
+            const refMenu = document.getElementById('refSearchMenu');
+            if (refMenu && refMenu.style.display === 'block') {
+                const inside = refMenu.contains(e.target) || e.target === refBtn;
+                if (!inside) { refMenu.style.display = 'none'; refBtn?.setAttribute('aria-expanded','false'); }
+            }
         });
 
         // Cancel button
@@ -745,9 +714,11 @@ class CoinCollection {
 
         // Import/Export buttons
         const exportBtnJson = document.getElementById('exportJsonBtn');
+    const exportBtnJsonLd = document.getElementById('exportJsonLdBtn');
         const importBtnJson = document.getElementById('importJsonBtn');
         const importFile = document.getElementById('importJsonFile');
-        if (exportBtnJson) exportBtnJson.addEventListener('click', () => this.exportCollection());
+    if (exportBtnJson) exportBtnJson.addEventListener('click', () => this.exportCollection());
+    if (exportBtnJsonLd) exportBtnJsonLd.addEventListener('click', () => this.exportCollectionJsonLd());
         if (importBtnJson && importFile) {
             importBtnJson.addEventListener('click', () => importFile.click());
             importFile.addEventListener('change', async (e) => {
@@ -816,6 +787,209 @@ class CoinCollection {
                 this.updatePrintBar();
             });
         }
+
+        // Reference search menu wiring
+        const refBtn = document.getElementById('refSearchBtn');
+        const refMenu = document.getElementById('refSearchMenu');
+        const refsInput = document.getElementById('coinReferences');
+        if (refBtn && refMenu && refsInput) {
+            const buildMenu = () => {
+                const term = encodeURIComponent(refsInput.value.trim());
+                const searchItems = [
+                    { label: 'OCRE search', url: term ? `https://numismatics.org/ocre/results?q=${term}` : 'https://numismatics.org/ocre/' },
+                    { label: 'CRRO search (Republican)', url: term ? `https://numismatics.org/crro/results?q=${term}` : 'https://numismatics.org/crro/' },
+                    { label: 'ACSearch', url: term ? `https://www.acsearch.info/search.html?term=${term}` : 'https://www.acsearch.info/' },
+                    { label: 'WildWinds (Google site search)', url: `https://www.google.com/search?q=${term}+site%3Awildwinds.com` },
+                    { label: 'Google (all web)', url: `https://www.google.com/search?q=${term}` }
+                ];
+                refMenu.innerHTML = searchItems.map(it => `<a href="${it.url}" class="menu-item" role="menuitem" target="_blank" rel="noopener">${it.label}</a>`).join('');
+            };
+            refBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const open = refMenu.style.display === 'block';
+                if (open) { refMenu.style.display = 'none'; refBtn.setAttribute('aria-expanded','false'); }
+                else { buildMenu(); refMenu.style.display = 'block'; refBtn.setAttribute('aria-expanded','true'); }
+            });
+        }
+    }
+
+    _updateMaterialLinkInfo(){
+        const host = document.getElementById('materialLinkInfo');
+        if (!host) return;
+        const sel = document.getElementById('coinMaterialSelect');
+        const other = document.getElementById('coinMaterialOther');
+        const val = sel?.value || '';
+        const label = (val === 'OTHER') ? (other?.value || '') : val;
+        // Show Nomisma link hint only for predefined options, not for custom OTHER
+        if (val && val !== 'OTHER') {
+            const uri = this._mapMaterialToNomisma({ code: val, label: val });
+            const text = (val==='AR'?'Silver (AR)':val==='AV'?'Gold (AV)':val==='AE'?'Bronze (AE)':val==='EL'?'Electrum (EL)':val==='BI'?'Billon (BI)':val==='CU'?'Copper (CU)': val);
+            if (uri) {
+                host.innerHTML = `<span class="chip" title="Linked to Nomisma material">${this.escapeHtml(text)}<a class="chip-link" href="${this.escapeHtml(uri)}" target="_blank" aria-label="Open Nomisma" title="Open on nomisma.org">🔗</a><span class="badge" title="Nomisma link">Nomisma</span><button type="button" class="chip-remove" title="Clear">×</button></span>`;
+                host.querySelector('.chip-remove')?.addEventListener('click', ()=>{ if (sel) sel.value=''; if (other) { other.value=''; other.style.display='none'; } this._updateMaterialLinkInfo(); });
+                return;
+            }
+        }
+        if (label && (val === 'OTHER')) {
+            host.innerHTML = `<span class="chip">${this.escapeHtml(label)}<button type="button" class="chip-remove" title="Clear">×</button></span>`;
+            host.querySelector('.chip-remove')?.addEventListener('click', ()=>{ if (other) other.value=''; this._updateMaterialLinkInfo(); });
+        } else {
+            host.innerHTML = '';
+        }
+    }
+
+    _mapMaterialToNomisma(mat){
+        const code = (typeof mat === 'object' && mat && mat.code) ? String(mat.code).toUpperCase() : null;
+        const label = (typeof mat === 'object' && mat && mat.label) ? String(mat.label) : (typeof mat === 'string' ? mat : '');
+        const txt = (label || '').toLowerCase().trim();
+        const byCode = {
+            AR: 'https://nomisma.org/id/ar',
+            AV: 'https://nomisma.org/id/av',
+            AE: 'https://nomisma.org/id/ae',
+            EL: 'https://nomisma.org/id/el',
+            BI: 'https://nomisma.org/id/bi',
+            CU: 'https://nomisma.org/id/cu'
+        };
+        if (code && byCode[code]) return byCode[code];
+        if (!txt) return null;
+        if (/\b(silver|argent|\bar\b)\b/.test(txt)) return 'https://nomisma.org/id/ar';
+        if (/\b(gold|aurum|\bav\b)\b/.test(txt)) return 'https://nomisma.org/id/av';
+        if (/\b(bronze|\bae\b)\b/.test(txt)) return 'https://nomisma.org/id/ae';
+        if (/\b(electrum|\bel\b)\b/.test(txt)) return 'https://nomisma.org/id/el';
+        if (/\b(billon|\bbi\b)\b/.test(txt)) return 'https://nomisma.org/id/bi';
+        if (/\b(copper|\bcu\b)\b/.test(txt)) return 'https://nomisma.org/id/cu';
+        return null;
+    }
+
+    // Build JSON-LD graph for the whole collection and download
+    exportCollectionJsonLd() {
+        try {
+            const context = {
+                rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                nmo: 'http://nomisma.org/ontology#',
+                dcterms: 'http://purl.org/dc/terms/',
+                foaf: 'http://xmlns.com/foaf/0.1/',
+                skos: 'http://www.w3.org/2004/02/skos/core#',
+                xsd: 'http://www.w3.org/2001/XMLSchema#'
+            };
+            const graph = [];
+            const toDec = (v) => {
+                if (v == null || v === '') return null;
+                const n = parseFloat(String(v).toString().replace(/[^0-9.\-]/g, ''));
+                return isNaN(n) ? null : n;
+            };
+            const mapMaterialToNomisma = (mat) => {
+                // Accept {code,label} or string; return Nomisma material URI or null
+                const code = (typeof mat === 'object' && mat && mat.code) ? String(mat.code).toUpperCase() : null;
+                const label = (typeof mat === 'object' && mat && mat.label) ? String(mat.label) : (typeof mat === 'string' ? mat : '');
+                const txt = (label || '').toLowerCase().trim();
+                // Code-based canonical URIs (lowercased code path per user feedback)
+                const byCode = {
+                    AR: 'https://nomisma.org/id/ar',
+                    AV: 'https://nomisma.org/id/av',
+                    AE: 'https://nomisma.org/id/ae',
+                    EL: 'https://nomisma.org/id/el',
+                    BI: 'https://nomisma.org/id/bi',
+                    CU: 'https://nomisma.org/id/cu'
+                };
+                if (code && byCode[code]) return byCode[code];
+                if (!txt) return null;
+                // Text inference -> code URIs
+                if (/\b(silver|argent|\bar\b)\b/.test(txt)) return 'https://nomisma.org/id/ar';
+                if (/\b(gold|aurum|\bav\b)\b/.test(txt)) return 'https://nomisma.org/id/av';
+                if (/\b(bronze|\bae\b)\b/.test(txt)) return 'https://nomisma.org/id/ae';
+                if (/\b(electrum|\bel\b)\b/.test(txt)) return 'https://nomisma.org/id/el';
+                if (/\b(billon|\bbi\b)\b/.test(txt)) return 'https://nomisma.org/id/bi';
+                if (/\b(copper|\bcu\b)\b/.test(txt)) return 'https://nomisma.org/id/cu';
+                return null;
+            };
+            const extractTypeSeriesUris = (coin) => {
+                const out = new Set();
+                const addIf = (s) => {
+                    if (!s) return;
+                    const re = /https?:\/\/numismatics\.org\/ocre\/[^\s\]\)"']+/gi;
+                    let m;
+                    while ((m = re.exec(s)) !== null) {
+                        out.add(m[0]);
+                    }
+                    // Detect CRRO (Roman Republican) IDs
+                    const reCrro = /https?:\/\/numismatics\.org\/crro\/[^\s\]\)"']+/gi;
+                    while ((m = reCrro.exec(s)) !== null) {
+                        out.add(m[0]);
+                    }
+                    // Pattern-based inference for Crawford numbers (RRC/Crawford 1234)
+                    const crawfordRe = /\b(?:RRC|Crawford)\s*(\d{1,4})([ABab]?)/g;
+                    while ((m = crawfordRe.exec(s)) !== null) {
+                        const num = m[1];
+                        out.add(`https://numismatics.org/crro/id/rrc-${num}`);
+                    }
+                };
+                addIf(coin.references);
+                // Future: inspect other fields (external_ids) for explicit type URIs
+                if (Array.isArray(coin.typeSeriesUris)) coin.typeSeriesUris.forEach(u=> out.add(u));
+                return Array.from(out);
+            };
+            for (const coin of this.coins) {
+                const coinId = `urn:coinflip:coin:${coin.id}`;
+                const node = { '@id': coinId, '@type': ['nmo:NumismaticObject'] };
+                if (coin.name) node['dcterms:title'] = [{ '@value': String(coin.name) }];
+                node['dcterms:identifier'] = [{ '@value': String(coin.id) }];
+                const w = toDec(coin.weight);
+                if (w != null) node['nmo:hasWeight'] = [{ '@value': String(w), '@type': 'xsd:decimal' }];
+                const d = toDec(coin.diameter);
+                if (d != null) node['nmo:hasDiameter'] = [{ '@value': String(d), '@type': 'xsd:decimal' }];
+                // Material mapping to Nomisma
+                const matUri = mapMaterialToNomisma(coin.material);
+                if (matUri) node['nmo:hasMaterial'] = [{ '@id': matUri }];
+                // Authority/Mint from Nomisma when linked
+                if (coin.ruler && typeof coin.ruler === 'object' && coin.ruler.nomisma_uri) {
+                    node['nmo:hasAuthority'] = [{ '@id': this._normalizeNomismaUrl(coin.ruler.nomisma_uri) }];
+                }
+                if (coin.origin && typeof coin.origin === 'object' && coin.origin.nomisma_uri) {
+                    node['nmo:hasMint'] = [{ '@id': this._normalizeNomismaUrl(coin.origin.nomisma_uri) }];
+                }
+                // Temporal information as readable label + exact years if present
+                const dateLabel = (typeof coin.date === 'object') ? (coin.date.label || '') : (coin.date || '');
+                const exact = (typeof coin.date === 'object') ? (coin.date.exact || null) : null;
+                const dateText = [dateLabel, this._formatDateRange(exact)].filter(Boolean).join(' ');
+                if (dateText) node['dcterms:temporal'] = [{ '@value': dateText }];
+                // Type series items (e.g., OCRE URIs) if present in references
+                const typeUris = extractTypeSeriesUris(coin);
+                if (typeUris.length) {
+                    node['nmo:hasTypeSeriesItem'] = typeUris.map(u => ({ '@id': u }));
+                }
+                // Obverse/Reverse images
+                const img0 = coin.images && coin.images[0];
+                const img1 = coin.images && coin.images[1];
+                if (img0) {
+                    const obvId = `${coinId}#obverse`;
+                    node['nmo:hasObverse'] = [{ '@id': obvId }];
+                    graph.push({ '@id': obvId, 'foaf:depiction': [{ '@id': img0 }] });
+                }
+                if (img1) {
+                    const revId = `${coinId}#reverse`;
+                    node['nmo:hasReverse'] = [{ '@id': revId }];
+                    graph.push({ '@id': revId, 'foaf:depiction': [{ '@id': img1 }] });
+                }
+                // Description, references
+                if (coin.description) node['dcterms:description'] = [{ '@value': String(coin.description) }];
+                if (coin.references) node['dcterms:bibliographicCitation'] = [{ '@value': String(coin.references) }];
+                graph.push(node);
+            }
+            const payload = { '@context': context, '@graph': graph };
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/ld+json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `coin-collection-${new Date().toISOString().slice(0,10)}.jsonld`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error('Export JSON-LD failed:', err);
+            alert('Failed to export JSON-LD. See console for details.');
+        }
     }
 
     // Switch form into Edit mode for a specific coin
@@ -829,20 +1003,25 @@ class CoinCollection {
         if (saveBtn) saveBtn.textContent = 'Update Coin';
         // Populate fields (file inputs cannot be prefilled)
         document.getElementById('coinName').value = coin.name || '';
-    // Date/Period text + exact range
+    // Date/Period exact range + flags
     if (typeof coin.date === 'object' && coin.date) {
-        document.getElementById('coinDate').value = coin.date.label || '';
+        const hiddenPeriod = document.getElementById('coinDate');
+        if (hiddenPeriod) hiddenPeriod.value = coin.date.label || '';
         const ex = coin.date.exact || null;
         const sy = document.getElementById('dateStartYear');
         const se = document.getElementById('dateStartEra');
         const ey = document.getElementById('dateEndYear');
         const ee = document.getElementById('dateEndEra');
+        const approx = document.getElementById('dateApprox');
         if (sy) sy.value = ex?.from?.year || '';
         if (se) se.value = ex?.from?.era || 'CE';
         if (ey) ey.value = ex?.to?.year || '';
         if (ee) ee.value = ex?.to?.era || 'CE';
+        if (approx) approx.checked = !!ex?.approx;
+        if (approx && approx.checked && ey) ey.value='';
     } else {
-        document.getElementById('coinDate').value = coin.date || '';
+        const hiddenPeriod = document.getElementById('coinDate');
+        if (hiddenPeriod) hiddenPeriod.value = typeof coin.date === 'string' ? (coin.date || '') : '';
     }
     document.getElementById('coinOrigin').value = coin.origin?.label || coin.origin || '';
     document.getElementById('coinRuler').value = coin.ruler?.label || coin.ruler || '';
@@ -875,33 +1054,46 @@ class CoinCollection {
         // Restore chips if structured selections exist
         const originChip = document.getElementById('originChip');
         const originInput = document.getElementById('coinOrigin');
-        if (coin.origin && typeof coin.origin === 'object' && coin.origin.nomisma_uri && originChip && originInput) {
-            originInput.dataset.nomismaUri = coin.origin.nomisma_uri;
-            originInput.dataset.nomismaQid = coin.origin.wikidata_qid || '';
-            originInput.dataset.nomismaLabel = coin.origin.label || '';
-            originChip.innerHTML = this._renderChip(coin.origin.label || '', coin.origin.nomisma_uri);
+        if (coin.origin && typeof coin.origin === 'object' && originChip && originInput) {
+            if (coin.origin.nomisma_uri) {
+                originInput.dataset.nomismaUri = coin.origin.nomisma_uri;
+                originInput.dataset.nomismaQid = coin.origin.wikidata_qid || '';
+                originInput.dataset.nomismaLabel = coin.origin.label || '';
+                originChip.innerHTML = this._renderChip(coin.origin.label || '', coin.origin.nomisma_uri);
+            } else if (coin.origin.label) {
+                // label-only chip
+                originInput.dataset.nomismaLabel = coin.origin.label;
+                originChip.innerHTML = `<span class="chip">${this.escapeHtml(coin.origin.label)}<button type="button" class="chip-remove" title="Remove link">×</button></span>`;
+            }
         }
         const rulerChip = document.getElementById('rulerChip');
         const rulerInput = document.getElementById('coinRuler');
-        if (coin.ruler && typeof coin.ruler === 'object' && coin.ruler.nomisma_uri && rulerChip && rulerInput) {
-            rulerInput.dataset.nomismaUri = coin.ruler.nomisma_uri;
-            rulerInput.dataset.nomismaQid = coin.ruler.wikidata_qid || '';
-            rulerInput.dataset.nomismaLabel = coin.ruler.label || '';
-            rulerChip.innerHTML = this._renderChip(coin.ruler.label || '', coin.ruler.nomisma_uri);
+        if (coin.ruler && typeof coin.ruler === 'object' && rulerChip && rulerInput) {
+            if (coin.ruler.nomisma_uri) {
+                rulerInput.dataset.nomismaUri = coin.ruler.nomisma_uri;
+                rulerInput.dataset.nomismaQid = coin.ruler.wikidata_qid || '';
+                rulerInput.dataset.nomismaLabel = coin.ruler.label || '';
+                rulerChip.innerHTML = this._renderChip(coin.ruler.label || '', coin.ruler.nomisma_uri);
+            } else if (coin.ruler.label) {
+                rulerInput.dataset.nomismaLabel = coin.ruler.label;
+                rulerChip.innerHTML = `<span class="chip">${this.escapeHtml(coin.ruler.label)}<button type="button" class="chip-remove" title="Remove link">×</button></span>`;
+            }
         }
         const periodChip = document.getElementById('periodChip');
         const periodInput = document.getElementById('coinDate');
-        if (coin.date && typeof coin.date === 'object' && coin.date.nomisma_uri && periodChip && periodInput) {
-            periodInput.dataset.nomismaUri = coin.date.nomisma_uri;
-            periodInput.dataset.nomismaQid = coin.date.wikidata_qid || '';
-            periodInput.dataset.nomismaLabel = coin.date.label || '';
-            periodChip.innerHTML = this._renderChip(coin.date.label || '', coin.date.nomisma_uri);
+        if (coin.date && typeof coin.date === 'object' && periodChip && periodInput) {
+            if (coin.date.nomisma_uri) {
+                periodInput.dataset.nomismaUri = coin.date.nomisma_uri;
+                periodInput.dataset.nomismaQid = coin.date.wikidata_qid || '';
+                periodInput.dataset.nomismaLabel = coin.date.label || '';
+                periodChip.innerHTML = this._renderChip(coin.date.label || '', coin.date.nomisma_uri);
+            } else if (coin.date.label) {
+                periodInput.dataset.nomismaLabel = coin.date.label;
+                periodChip.innerHTML = `<span class="chip">${this.escapeHtml(coin.date.label)}<button type="button" class="chip-remove" title="Remove link">×</button></span>`;
+            }
         }
         // Enrichment toggles (consolidated)
-        const opts = coin.enrichment_opts || { ruler: true, origin: true, date: true };
-        const chkR = document.getElementById('enrichUseRuler'); if (chkR) chkR.checked = !!opts.ruler;
-        const chkO = document.getElementById('enrichUseOrigin'); if (chkO) chkO.checked = !!opts.origin;
-        const chkD = document.getElementById('enrichUsePeriod'); if (chkD) chkD.checked = !!opts.date;
+    // Enrichment toggles removed; enrichment now automatic based on linked fields.
         document.getElementById('coinObverse').value = coin.obverse || '';
         document.getElementById('coinReverse').value = coin.reverse || '';
         // Clear file inputs
@@ -923,6 +1115,21 @@ class CoinCollection {
         const se = document.getElementById('dateStartEra'); if (se) se.value='CE';
         const ey = document.getElementById('dateEndYear'); if (ey) ey.value='';
         const ee = document.getElementById('dateEndEra'); if (ee) ee.value='CE';
+        const approx = document.getElementById('dateApprox'); if (approx) approx.checked = false;
+        // Clear hidden period input & chip
+        const hiddenPeriod = document.getElementById('coinDate'); if (hiddenPeriod) { hiddenPeriod.value=''; delete hiddenPeriod.dataset.nomismaUri; delete hiddenPeriod.dataset.nomismaQid; delete hiddenPeriod.dataset.nomismaLabel; }
+        const periodChip = document.getElementById('periodChip'); if (periodChip) periodChip.innerHTML='';
+        // Clear origin/ruler chips & datasets
+        const origin = document.getElementById('coinOrigin'); if (origin) { delete origin.dataset.nomismaUri; delete origin.dataset.nomismaQid; delete origin.dataset.nomismaLabel; }
+        const originChip = document.getElementById('originChip'); if (originChip) originChip.innerHTML='';
+        const ruler = document.getElementById('coinRuler'); if (ruler) { delete ruler.dataset.nomismaUri; delete ruler.dataset.nomismaQid; delete ruler.dataset.nomismaLabel; }
+        const rulerChip = document.getElementById('rulerChip'); if (rulerChip) rulerChip.innerHTML='';
+        // Clear material selection and chip
+        const matSel = document.getElementById('coinMaterialSelect'); if (matSel) matSel.value='';
+        const matOther = document.getElementById('coinMaterialOther'); if (matOther) { matOther.value=''; matOther.style.display='none'; }
+        const matInfo = document.getElementById('materialLinkInfo'); if (matInfo) matInfo.innerHTML='';
+        // Clear reference menu any leftover
+        const refMenu = document.getElementById('refSearchMenu'); if (refMenu) refMenu.style.display='none';
     }
 
     // Export all coins to a downloadable JSON file
@@ -1034,9 +1241,7 @@ class CoinCollection {
         const imageFiles = document.getElementById('coinImages').files;
         const modelFile = document.getElementById('coin3DModel').files[0];
     const nomismaId = (document.getElementById('coinNomismaId')?.value || '').trim() || null;
-        const useRulerEnrich = !!document.getElementById('enrichUseRuler')?.checked;
-        const useOriginEnrich = !!document.getElementById('enrichUseOrigin')?.checked;
-        const useDateEnrich = !!document.getElementById('enrichUsePeriod')?.checked;
+    // Enrichment options removed; always enrich linked fields automatically.
 
         if (isEdit) {
             const coin = this.coins.find(c => c.id === this.editingCoinId);
@@ -1050,18 +1255,22 @@ class CoinCollection {
             coin.diameter = diameter;
             coin.description = description;
             coin.references = references;
+            // Update type series URIs derived from references
+            coin.typeSeriesUris = this._extractTypeSeriesFromReferences(references);
             coin.external_ids = coin.external_ids || { nomisma: null, wikidata: null, searchUrls: null };
             coin.external_ids.nomisma = nomismaId || coin.external_ids.nomisma || null;
-            coin.enrichment_opts = { ruler: useRulerEnrich, origin: useOriginEnrich, date: useDateEnrich };
+            // enrichment_opts removed
             coin.obverse = obverse;
             coin.reverse = reverse;
 
             // Replace images only if new ones were selected
+            let prevImagesForEdit = null;
             if (imageFiles && imageFiles.length > 0) {
+                prevImagesForEdit = Array.isArray(coin.images) ? coin.images.slice() : [];
                 coin.images = [];
                 for (let file of imageFiles) {
-                    const base64 = await this.fileToBase64(file);
-                    coin.images.push(base64);
+                    const base64 = await this.compressImage(file, { maxDim: 1600, quality: 0.85 });
+                    if (base64) coin.images.push(base64);
                 }
             }
 
@@ -1083,7 +1292,29 @@ class CoinCollection {
             } catch (err) {
                 // If new asset was created but something failed afterwards, best-effort cleanup
                 if (newAssetId) { try { await assetStorage.delete(newAssetId); } catch (_) {} }
-                if (err && err.message === 'LOCALSTORAGE_QUOTA') {
+                if (err && err.message === 'LOCALSTORAGE_QUOTA' && imageFiles && imageFiles.length > 0) {
+                    // Retry with stronger compression
+                    try {
+                        const prevImages = Array.isArray(coin.images) ? coin.images.slice() : [];
+                        coin.images = [];
+                        for (let file of imageFiles) {
+                            const base64 = await this.compressImage(file, { maxDim: 1200, quality: 0.75 });
+                            if (base64) coin.images.push(base64);
+                        }
+                        this.saveCoins();
+                        this.renderCoins();
+                        coin.enrichment_status = 'stale';
+                        try { await this.enrichCoin(coin.id, { force: true, linksOnly: false }); } catch (_) {}
+                        this.resetFormToAddMode();
+                        return;
+                    } catch (e2) {
+                        // Rollback images to previous state and clear file input
+                        try { if (prevImagesForEdit) coin.images = prevImagesForEdit; } catch(_){ }
+                        const imgInput = document.getElementById('coinImages'); if (imgInput) imgInput.value = '';
+                        alert('Not enough browser storage to update this coin even after compression. Remove or reduce images and try again.');
+                        return;
+                    }
+                } else if (err && err.message === 'LOCALSTORAGE_QUOTA') {
                     alert('Not enough browser storage to update this coin.');
                 } else {
                     console.error('Failed to update coin:', err);
@@ -1112,13 +1343,14 @@ class CoinCollection {
             facts_snapshot: null,
             enrichment_status: 'stale',
             enrichment_fetched_at: null,
-            enrichment_opts: { ruler: useRulerEnrich, origin: useOriginEnrich, date: useDateEnrich }
+            // enrichment_opts removed
+            typeSeriesUris: this._extractTypeSeriesFromReferences(references)
         };
 
-        // Process images
+        // Process images (initial compression)
         for (let file of imageFiles) {
-            const base64 = await this.fileToBase64(file);
-            coin.images.push(base64);
+            const base64 = await this.compressImage(file, { maxDim: 1600, quality: 0.85 });
+            if (base64) coin.images.push(base64);
         }
 
         // Process 3D model (store in IndexedDB)
@@ -1136,13 +1368,38 @@ class CoinCollection {
             try { await this.enrichCoin(coin.id, { force: true, linksOnly: false }); } catch (_) {}
         } catch (err) {
             if (modelAssetId) { try { await assetStorage.delete(modelAssetId); } catch (_) {} }
-            if (err && err.message === 'LOCALSTORAGE_QUOTA') {
+            if (err && err.message === 'LOCALSTORAGE_QUOTA' && imageFiles && imageFiles.length > 0) {
+                // Retry with stronger compression
+                try {
+                    // Remove previously pushed coin if any
+                    this.coins = this.coins.filter(c => c.id !== coin.id);
+                    coin.images = [];
+                    for (let file of imageFiles) {
+                        const base64 = await this.compressImage(file, { maxDim: 1200, quality: 0.75 });
+                        if (base64) coin.images.push(base64);
+                    }
+                    this.coins.push(coin);
+                    this.saveCoins();
+                    this.renderCoins();
+                    try { await this.enrichCoin(coin.id, { force: true, linksOnly: false }); } catch (_) {}
+                } catch (e2) {
+                    // Ensure coin not left inserted and clear file input
+                    this.coins = this.coins.filter(c => c.id !== coin.id);
+                    const imgInput = document.getElementById('coinImages'); if (imgInput) imgInput.value = '';
+                    alert('Not enough browser storage even after compression. Please reduce image sizes or remove some items and try again.');
+                    return;
+                }
+            } else if (err && err.message === 'LOCALSTORAGE_QUOTA') {
+                // Remove previously pushed coin and clear input
+                this.coins = this.coins.filter(c => c.id !== coin.id);
+                const imgInput = document.getElementById('coinImages'); if (imgInput) imgInput.value = '';
                 alert('Not enough browser storage to save this coin. Please reduce image sizes or remove some items and try again.');
                 return;
+            } else {
+                console.error('Failed to add coin:', err);
+                alert('Failed to add coin. See console for details.');
+                return;
             }
-            console.error('Failed to add coin:', err);
-            alert('Failed to add coin. See console for details.');
-            return;
         }
 
         this.resetFormToAddMode();
@@ -1166,12 +1423,12 @@ class CoinCollection {
         });
         const search = async () => {
             const term = input.value.trim();
-            if (!term) { suggest.style.display='none'; return; }
+            if (!term && field !== 'period') { suggest.style.display='none'; return; }
             suggest.innerHTML = '<div class="suggest-items"><div class="suggest-item"><span class="s-label">Searching Nomisma…</span></div></div>';
             suggest.style.display = 'block';
             let items = [];
             try {
-                items = await this.searchNomismaByType(term, types);
+                items = term ? await this.searchNomismaByType(term, types) : [];
             } catch (e) {
                 console.error('Scoped Nomisma search failed:', e);
             }
@@ -1195,18 +1452,38 @@ class CoinCollection {
                     items = await this.authorityFallbackSuggestions(term);
                 } catch (_) {}
             }
-            if (!items || items.length === 0) {
+            // Build manual "Use as plain text" option when there's a term
+            const manual = term ? [{ id: '', label: term, labelOnly: true, isPlain: true }] : [];
+            const isPeriod = field === 'period';
+            const itemsForContext = items && items.length ? items : [];
+            // Decide display order: for period, append manual at end; for others, put manual first
+            const displayItems = (items && items.length)
+                ? (isPeriod ? [...items, ...manual] : [...manual, ...items])
+                : (manual.length ? manual : []);
+            if (displayItems.length === 0) {
                 suggest.innerHTML = '<div class="suggest-items"><div class="suggest-item"><span class="s-label">No suggestions</span></div></div>';
                 return;
             }
-            // Mark first item as primary for period suggestions
-            const isPeriod = field === 'period';
-            suggest.innerHTML = `<div class="suggest-items">${items.map((it,idx)=>`<div class="suggest-item ${isPeriod && idx===0? 'suggest-primary':''}" data-uri="${it.id}" data-qid="${it.qid||''}" data-label-only="${it.labelOnly? '1':'0'}"><span class="s-label">${this.escapeHtml(it.label)}</span>${it.labelOnly? '' : `<span class=\"s-id\">${this.escapeHtml(it.id)}</span>`}</div>`).join('')}</div>`;
+            // Mark first item as primary for period suggestions (exclude manual-only case)
+            suggest.innerHTML = `<div class="suggest-items">${displayItems.map((it,idx)=>{
+                const primaryClass = (isPeriod && idx===0 && !it.isPlain) ? 'suggest-primary' : '';
+                const labelText = it.isPlain ? `Use as plain text: \u201C${this.escapeHtml(it.label)}\u201D` : this.escapeHtml(it.label);
+                const dataLabel = this.escapeHtml(it.label);
+                const dataUri = it.id || '';
+                const dataQid = it.qid || '';
+                const labelOnly = it.labelOnly ? '1' : '0';
+                const idHtml = it.labelOnly ? '' : `<span class=\"s-id\">${this.escapeHtml(it.id)}</span>`;
+                return `<div class=\"suggest-item ${primaryClass}\" data-uri=\"${dataUri}\" data-qid=\"${dataQid}\" data-label-only=\"${labelOnly}\" data-label=\"${dataLabel}\">`
+                       + `<span class=\"s-label\">${labelText}</span>`
+                       + `${idHtml}`
+                       + `</div>`;
+            }).join('')}</div>`;
             suggest.querySelectorAll('.suggest-item').forEach(el=>{
                 el.addEventListener('click', async ()=>{
                     const uri = el.getAttribute('data-uri');
                     const qid = el.getAttribute('data-qid') || null;
-                    const label = el.querySelector('.s-label').textContent;
+                    const dataLabel = el.getAttribute('data-label');
+                    const label = dataLabel || (el.querySelector('.s-label')?.textContent || '');
                     const labelOnly = el.getAttribute('data-label-only') === '1';
                     // store in dataset for later save
                     if (!labelOnly) {
@@ -1224,7 +1501,7 @@ class CoinCollection {
                     if (field === 'period') this._updatePeriodContext();
                 });
             });
-            if (field === 'period') this._updatePeriodContext(items);
+            if (field === 'period') this._updatePeriodContext(itemsForContext);
         };
         btn.addEventListener('click', search);
         input.addEventListener('keydown', (e)=>{ if (e.key==='Enter'){ e.preventDefault(); search(); }});
@@ -1234,9 +1511,12 @@ class CoinCollection {
         if (field === 'period') {
             const sy = document.getElementById('dateStartYear');
             const ey = document.getElementById('dateEndYear');
-            const hook = ()=>{ if (sy?.value || ey?.value) { this._updatePeriodContext(); search(); } };
-            sy?.addEventListener('input', hook);
-            ey?.addEventListener('input', hook);
+            const approx = document.getElementById('dateApprox');
+            // Year changes only update context; Find Period button does the search
+            const hookYears = ()=>{ this._updatePeriodContext(); };
+            sy?.addEventListener('input', hookYears);
+            ey?.addEventListener('input', hookYears);
+            approx?.addEventListener('change', ()=>{ this._updatePeriodContext(); if (approx.checked && ey) { ey.value=''; } });
         }
     }
 
@@ -1244,7 +1524,7 @@ class CoinCollection {
         if (!uri) {
             return `<span class="chip">${this.escapeHtml(label)}<button type="button" class="chip-remove" title="Remove link">×</button></span>`;
         }
-        return `<span class="chip">${this.escapeHtml(label)}<a class="chip-link" href="${this.escapeHtml(uri)}" target="_blank" aria-label="Open Nomisma">🔗</a><button type="button" class="chip-remove" title="Remove link">×</button></span>`;
+        return `<span class="chip">${this.escapeHtml(label)}<a class="chip-link" href="${this.escapeHtml(uri)}" target="_blank" aria-label="Open Nomisma" title="Open on nomisma.org">🔗</a><button type="button" class="chip-remove" title="Remove link">×</button></span>`;
     }
 
     _readScopedSelection(field, fallbackText){
@@ -1256,6 +1536,10 @@ class CoinCollection {
                 if (exact) base.exact = exact;
             }
             return base;
+        }
+        // Label-only chip for non-period fields
+        if (field !== 'period' && el && el.dataset.nomismaLabel && !el.dataset.nomismaUri) {
+            return { label: el.dataset.nomismaLabel, nomisma_uri: null, wikidata_qid: null };
         }
         // Label-only period selection (chip without link)
         if (field === 'period' && el && el.dataset.nomismaLabel && !el.dataset.nomismaUri) {
@@ -1278,13 +1562,16 @@ class CoinCollection {
         const se = document.getElementById('dateStartEra');
         const ey = document.getElementById('dateEndYear');
         const ee = document.getElementById('dateEndEra');
+        const approx = document.getElementById('dateApprox');
         const startYear = sy && sy.value ? parseInt(sy.value, 10) : null;
         const startEra = se ? (se.value || 'CE') : 'CE';
-        const endYear = ey && ey.value ? parseInt(ey.value, 10) : null;
+        const endYear = (approx && approx.checked) ? null : (ey && ey.value ? parseInt(ey.value, 10) : null);
         const endEra = ee ? (ee.value || 'CE') : 'CE';
         if (!startYear && !endYear) return null;
         const norm = (y, era) => ({ year: (y && !isNaN(y)) ? y : null, era: (era === 'BCE' ? 'BCE' : 'CE') });
-        return { from: norm(startYear, startEra), to: norm(endYear, endEra) };
+        const obj = { from: norm(startYear, startEra), to: norm(endYear, endEra) };
+        if (approx && approx.checked) obj.approx = true;
+        return obj;
     }
 
     _formatDateRange(exact){
@@ -1292,8 +1579,9 @@ class CoinCollection {
         const fmt = ({year, era}) => year ? `${year} ${era}` : '';
         const a = fmt(exact.from||{});
         const b = fmt(exact.to||{});
-        if (a && b) return `${a} – ${b}`;
-        return a || b;
+        const prefix = exact.approx ? 'c. ' : '';
+        if (a && b) return `${prefix}${a} – ${b}`;
+        return `${prefix}${a || b}`;
     }
 
     _updatePeriodContext(suggestions){
@@ -1305,11 +1593,13 @@ class CoinCollection {
             const ey = document.getElementById('dateEndYear');
             const ee = document.getElementById('dateEndEra');
             const sYear = sy?.value ? parseInt(sy.value,10) : null;
-            const eYear = ey?.value ? parseInt(ey.value,10) : null;
+            const approxChecked = document.getElementById('dateApprox')?.checked;
+            const eYear = approxChecked ? null : (ey?.value ? parseInt(ey.value,10) : null);
             const sEra = se?.value || 'CE';
             const eEra = ee?.value || 'CE';
+            const approx = approxChecked ? 'c. ' : '';
             const buildYear = (y, era)=> y!=null? `${y} ${era}`:'';
-            const rangeText = (sYear||eYear)? [buildYear(sYear,sEra), buildYear(eYear,eEra)].filter(Boolean).join(' – ') : '';
+            const rangeText = (sYear||eYear)? `${approx}${[buildYear(sYear,sEra), approxChecked? '' : buildYear(eYear,eEra)].filter(Boolean).join(' – ')}` : '';
             let line = '';
             if (rangeText) line += `<strong>Range:</strong> ${rangeText}. `;
             if (suggestions && suggestions.length) {
@@ -1375,68 +1665,14 @@ class CoinCollection {
         return out.concat(items.slice(5));
     }
 
-    // Nomisma SPARQL search by label/altLabel
+    // Nomisma SPARQL search by label/altLabel (broad types wrapper)
     async searchNomisma(term) {
-        const safe = term.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        const q = `SELECT ?id ?label WHERE {
-  { ?id <http://www.w3.org/2004/02/skos/core#prefLabel> ?label }
-  UNION { ?id <http://www.w3.org/2004/02/skos/core#altLabel> ?label }
-  FILTER(LANG(?label)='en')
-  FILTER(CONTAINS(LCASE(?label), LCASE('${safe}')))
-} LIMIT 8`;
-        // Try the documented /query endpoint first, then legacy /sparql; prefer HTTPS
-        const endpoints = [
-            'https://nomisma.org/query',
-            'http://nomisma.org/query',
-            'https://nomisma.org/sparql',
-            'http://nomisma.org/sparql'
-        ];
-        let data = null;
-        for (const base of endpoints) {
-            const url = `${base}?query=${encodeURIComponent(q)}&format=application%2Fsparql-results%2Bjson`;
-            try {
-                const res = await this._fetchWithTimeout(url, { timeout: 15000 });
-                if (!res.ok) { console.error('Nomisma SPARQL HTTP error:', res.status, 'at', base); continue; }
-                data = await res.json().catch(() => null);
-                if (data) break;
-            } catch (e) {
-                console.error('Nomisma SPARQL request failed at', base, e);
-                continue;
-            }
+        try {
+            const types = ['person','authority','place','mint','period'];
+            return await this.searchNomismaByType(term, types);
+        } catch (_) {
+            return [];
         }
-        if (!data) return [];
-        if (!data) return [];
-        const rows = (data && data.results && data.results.bindings) ? data.results.bindings : [];
-        return rows.map(r => ({ id: r.id.value, label: r.label.value })).filter(x => /\/id\//.test(x.id));
-    }
-
-    // Probe likely Nomisma ID candidates via JSON-LD when SPARQL is blocked
-    async probeNomismaIds(term) {
-        const slugs = this._candidateNomismaSlugs(term);
-        if (!slugs.length) return [];
-        const candidates = [];
-        slugs.forEach(s => {
-            candidates.push(`https://nomisma.org/id/${s}`);
-            candidates.push(`http://nomisma.org/id/${s}`);
-        });
-        const found = [];
-        for (const base of candidates) {
-            const urls = [`${base}.jsonld`, base];
-            for (const u of urls) {
-                try {
-                    const isJsonld = /\.jsonld$/i.test(u);
-                    const res = await this._fetchWithTimeout(u, { timeout: 10000, init: isJsonld ? {} : { headers: { Accept: 'application/ld+json, application/json;q=0.9, */*;q=0.1' } } });
-                    const ctype = res.headers.get('content-type') || '';
-                    if (!/json/i.test(ctype)) continue;
-                    const data = await res.json();
-                    const label = this._extractNomismaLabel(data) || base.split('/').pop();
-                    found.push({ id: base, label });
-                    break; // stop trying alternate of same base
-                } catch (_) { /* try next */ }
-            }
-            if (found.length > 0) break;
-        }
-        return found;
     }
 
     // Last-resort: match against embedded authority list and verify via JSON-LD
@@ -1467,12 +1703,12 @@ class CoinCollection {
         if (!text) return '';
         return String(text)
             .trim()
-            .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // remove diacritics
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
             .toLowerCase()
             .replace(/[^a-z0-9\s-]/g, '')
             .replace(/\s+/g, '-')
             .replace(/-+/g, '-')
-            .replace(/^[-]+|[-]+$/g, '');
+            .replace(/^-+|-+$/g, '');
     }
 
     _candidateNomismaSlugs(text) {
@@ -1482,7 +1718,6 @@ class CoinCollection {
         const hyphen = lower.replace(/\s+/g, '-');
         const underscore = lower.replace(/\s+/g, '_');
         const compact = lower.replace(/\s+/g, '');
-        // roman numerals to lowercase (keep spacing), e.g., gordian iii -> gordian iii
         const romanLower = lower.replace(/\b[ivxlcdm]+\b/gi, (m)=>m.toLowerCase());
         const romanHyphen = romanLower.replace(/\s+/g, '-');
         const romanUnderscore = romanLower.replace(/\s+/g, '_');
@@ -1508,7 +1743,6 @@ class CoinCollection {
     // Quick connectivity diagnostics for Nomisma
     async testNomismaConnectivity() {
         const out = { sparql: { ok: false, error: null }, jsonld: { ok: false, error: null } };
-        // SPARQL: use ASK{} to minimize payload
         const ask = 'ASK{}';
         const sparqlEndpoints = ['https://nomisma.org/sparql', 'http://nomisma.org/sparql'];
         for (const base of sparqlEndpoints) {
@@ -1522,7 +1756,6 @@ class CoinCollection {
                 out.sparql.error = e.message || String(e);
             }
         }
-        // JSON-LD: try a known resource
         const jsonCandidates = [
             'https://nomisma.org/id/athens.jsonld',
             'https://nomisma.org/id/athens',
@@ -1553,6 +1786,55 @@ class CoinCollection {
             reader.onerror = reject;
             reader.readAsDataURL(file);
         });
+    }
+
+    // Compress an image file into a JPEG base64 with max dimension and quality
+    async compressImage(file, { maxDim = 1600, quality = 0.85, mime } = {}) {
+        try {
+            const url = URL.createObjectURL(file);
+            const img = await new Promise((res, rej) => {
+                const im = new Image();
+                im.onload = () => res(im);
+                im.onerror = rej;
+                im.src = url;
+            });
+            const { width, height } = img;
+            let targetW = width, targetH = height;
+            if (width > height) {
+                if (width > maxDim) {
+                    targetW = maxDim;
+                    targetH = Math.round(height * (maxDim / width));
+                }
+            } else {
+                if (height > maxDim) {
+                    targetH = maxDim;
+                    targetW = Math.round(width * (maxDim / height));
+                }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = targetW;
+            canvas.height = targetH;
+            const ctx = canvas.getContext('2d');
+            // Decide output format: preserve transparency for PNGs; otherwise JPEG
+            const isPngInput = /png/i.test(file.type || '');
+            const outMime = mime || (isPngInput ? 'image/png' : 'image/jpeg');
+            if (outMime === 'image/jpeg') {
+                // Fill with neutral grey so transparent areas don't turn black in JPEG
+                let bg = '#efefef';
+                try {
+                    const cssBg = getComputedStyle(document.documentElement).getPropertyValue('--coin-bg').trim();
+                    if (cssBg) bg = cssBg;
+                } catch(_) {}
+                ctx.fillStyle = bg;
+                ctx.fillRect(0, 0, targetW, targetH);
+            }
+            ctx.drawImage(img, 0, 0, targetW, targetH);
+            const dataUrl = canvas.toDataURL(outMime, quality);
+            URL.revokeObjectURL(url);
+            return dataUrl;
+        } catch (e) {
+            try { return await this.fileToBase64(file); } catch { return null; }
+        }
     }
 
     // Escape HTML to prevent XSS
@@ -1890,18 +2172,131 @@ class CoinCollection {
         if (!coin) return;
 
         const modalBody = document.getElementById('modalBody');
+        // Helpers for display
+        const snap = (this.coins.find(x=>x.id===coin.id)?.facts_snapshot) || null;
+        const nbsp = '\u00A0';
+        const nnbsp = '\u202F';
+        const formatNum = (v, opts={}) => {
+            if (v == null || v === '') return '';
+            const num = Number(String(v).replace(/[^0-9.\-]/g,''));
+            if (!isFinite(num)) return '';
+            const fmt = new Intl.NumberFormat(navigator.language || 'en', { maximumFractionDigits: 2, ...opts });
+            return fmt.format(num);
+        };
+        const formatUnit = (v, unit) => {
+            const s = formatNum(v);
+            return s ? `${s}${nnbsp}${unit}` : '';
+        };
+        const formatCompactDateRange = (exact) => {
+            if (!exact) return '';
+            const fy = exact.from?.year, fe = exact.from?.era || 'CE';
+            const ty = exact.to?.year, te = exact.to?.era || 'CE';
+            const approx = exact.approx ? 'c. ' : '';
+            if (fy && ty) {
+                if (fe === te) return `${approx}${fy}–${ty} ${fe}`;
+                return `${approx}${fy} ${fe} – ${ty} ${te}`;
+            }
+            if (fy) return `${approx}${fy} ${fe}`;
+            if (ty) return `${approx}${ty} ${te}`;
+            return '';
+        };
+        const graceful = (s) => {
+            const t = String(s || '').trim();
+            return t ? this.escapeHtml(t) : '—';
+        };
+        // Prepare linked display values
+        const formatDateOnly = () => {
+            const exact = (typeof coin.date==='object') ? (coin.date.exact || null) : null;
+            return graceful(formatCompactDateRange(exact));
+        };
+        const formatPeriod = () => {
+            const lbl = (typeof coin.date==='object') ? (coin.date.label || '') : '';
+            const uri = (typeof coin.date==='object' && coin.date.nomisma_uri) ? this._normalizeNomismaUrl(coin.date.nomisma_uri) : null;
+            if (!lbl && !uri) return '';
+            const labelText = graceful(lbl);
+            return uri ? `<a href="${this.escapeHtml(uri)}" target="_blank" rel="noopener" title="Open on nomisma.org">${labelText}</a>` : labelText;
+        };
+        const formatOrigin = () => {
+            if (!coin.origin) return '';
+            // Prefer Nomisma-enriched label
+            const nmLabel = snap?.nomisma_origin?.label || null;
+            const labelRaw = nmLabel || ((typeof coin.origin==='object') ? (coin.origin.label || '') : (coin.origin || ''));
+            const label = labelRaw ? (labelRaw.charAt(0).toUpperCase() + labelRaw.slice(1)) : '';
+            const uri = (typeof coin.origin==='object' && coin.origin.nomisma_uri) ? this._normalizeNomismaUrl(coin.origin.nomisma_uri) : null;
+            if (uri && label) return `<a href="${this.escapeHtml(uri)}" target="_blank" rel="noopener" title="Open on nomisma.org">${this.escapeHtml(label)}</a>`;
+            return this.escapeHtml(label);
+        };
+        const formatRuler = () => {
+            if (!coin.ruler) return '';
+            const label = (typeof coin.ruler==='object') ? (coin.ruler.label || '') : (coin.ruler || '');
+            const uri = (typeof coin.ruler==='object' && coin.ruler.nomisma_uri) ? this._normalizeNomismaUrl(coin.ruler.nomisma_uri) : null;
+            if (uri && label) return `<a href="${this.escapeHtml(uri)}" target="_blank" rel="noopener" title="Open on nomisma.org">${this.escapeHtml(label)}</a>`;
+            return this.escapeHtml(label);
+        };
+        const matLabel = (coin.material && typeof coin.material==='object') ? (coin.material.label || '') : (coin.material || '');
+    const matUri = this._mapMaterialToNomisma(coin.material);
+        const formatMaterial = () => {
+            if (!matLabel) return '';
+            if (!matUri) return this.escapeHtml(matLabel);
+            // Link only the material word, keep code suffix (e.g., (AR)) unlinked
+            const m = String(matLabel).match(/^(.*?)(\s*\([^)]*\))?$/);
+            const base = (m && m[1]) ? m[1] : matLabel;
+            const suffix = (m && m[2]) ? m[2] : '';
+            return `<a href="${this.escapeHtml(matUri)}" target="_blank" rel="noopener" title="Open on nomisma.org">${this.escapeHtml(base)}</a>${this.escapeHtml(suffix)}`;
+        };
+        const linkifySafe = (s) => {
+            if (!s) return '';
+            const urlRe = /https?:\/\/[^\s)]+/gi;
+            const parts = [];
+            let last = 0;
+            let m;
+            while ((m = urlRe.exec(s)) !== null) {
+                if (m.index > last) parts.push({ t:'text', v: s.slice(last, m.index) });
+                parts.push({ t:'url', v: m[0] });
+                last = m.index + m[0].length;
+            }
+            if (last < s.length) parts.push({ t:'text', v: s.slice(last) });
+            return parts.map(p => p.t==='url' ? `<a href="${this.escapeHtml(p.v)}" target="_blank" rel="noopener">${this.escapeHtml(p.v)}</a>` : this.escapeHtml(p.v)).join('');
+        };
+        const formatReferences = (s) => {
+            if (!s) return '';
+            let t = String(s).trim();
+            t = t.replace(/^\s*references\s*:\s*/i, ''); // remove leading label
+            // Normalize separators to semicolon + space
+            const parts = t.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
+            return parts.map(this.escapeHtml).join('; ');
+        };
+        // Resolve authority label (WD > Nomisma > chip)
+        const authorityInfo = snap?.authority_info || null;
+        const nmRulerLabel = snap?.nomisma_ruler?.label || (typeof coin.ruler==='object' ? coin.ruler.label : '') || '';
+        const resolvedRulerLabel = authorityInfo?.label || nmRulerLabel || '';
+        const reignText = (() => {
+            const c = authorityInfo?.claims_parsed?.reign || null;
+            if (!c) return '';
+            const exact = { from: c.start || null, to: c.end || null };
+            const s = formatCompactDateRange(exact);
+            return s ? `r. ${s}` : '';
+        })();
+
         modalBody.innerHTML = `
             <div class="modal-header">
-                <h2>${coin.name}</h2>
+                <h2>${this.escapeHtml(coin.name)}</h2>
                 <div class="modal-actions">
+                    <button id="refreshSnapshotBtn" class="btn-secondary">Refresh snapshot</button>
                     <button id="editCoinBtn" class="btn-secondary">Edit</button>
                 </div>
             </div>
+            <div class="modal-subdivider"></div>
 
             ${coin.images.length > 0 ? `
-                <div class="modal-images">
-                    ${coin.images.map(img => `<img src="${img}" alt="${coin.name}">`).join('')}
+                <div class="modal-media ${coin.images.length>1 ? 'grid-2' : ''}">
+                    ${coin.images.slice(0,2).map((img,i) => `
+                        <div class="img-wrap">
+                            <img class="img-main" src="${img}" alt="${this.escapeHtml(coin.name)} ${i===0?'(obverse)':'(reverse)'}">
+                        </div>
+                    `).join('')}
                 </div>
+                ${coin.images.length>2 ? `<div class=\"modal-thumbs\">${coin.images.slice(2).map((img,ti)=>`<img src=\"${img}\" alt=\"thumb\" data-thumb-index=\"${ti+2}\">`).join('')}</div>`:''}
             ` : ''}
 
             ${coin.model3D ? `
@@ -1911,90 +2306,138 @@ class CoinCollection {
                 </div>
             ` : ''}
 
-            <div class="modal-info">
-                <div class="info-section">
-                    <h3>Basic Information</h3>
-                    <div class="info-item">
-                        <strong>Date/Period:</strong>
-                        <span>${(typeof coin.date==='object') ? [coin.date.label||'', this._formatDateRange(coin.date.exact)].filter(Boolean).join(' ') : coin.date}</span>
+            <div class="modal-grid">
+                <div class="left-col">
+                    <div class="card">
+                        <h3>Basic Information</h3>
+                        <div class="dl-grid cols-2 dl">
+                            ${(typeof coin.date==='object' && coin.date.exact) ? `
+                                <div>
+                                    <dt>Date</dt>
+                                    <dd>${formatDateOnly()}</dd>
+                                </div>
+                            `:''}
+                            ${(typeof coin.date==='object' && (coin.date.label || coin.date.nomisma_uri)) ? `
+                                <div>
+                                    <dt>Period</dt>
+                                    <dd>${formatPeriod()}</dd>
+                                </div>
+                            `:''}
+                            ${coin.origin ? `
+                                <div>
+                                    <dt>Origin/Mint</dt>
+                                    <dd>${formatOrigin()}</dd>
+                                </div>
+                            `:''}
+                            ${ (coin.ruler || resolvedRulerLabel) ? `
+                                <div>
+                                    <dt>Ruler/Authority</dt>
+                                    <dd>
+                                        ${(() => {
+                                            const nmUri = (typeof coin.ruler==='object' && coin.ruler.nomisma_uri) ? this._normalizeNomismaUrl(coin.ruler.nomisma_uri) : (snap?.nomisma_ruler?.uri || null);
+                                            const label = this.escapeHtml(resolvedRulerLabel || (typeof coin.ruler==='object' ? (coin.ruler.label||'') : (coin.ruler||'')));
+                                            const nameHtml = nmUri ? `<a href="${this.escapeHtml(nmUri)}" target="_blank" rel="noopener">${label}</a>` : label;
+                                            const reignHtml = reignText ? `<div class=\"text-muted\" style=\"font-size:12px\">${this.escapeHtml(reignText)}</div>` : '';
+                                            return `${nameHtml}${reignHtml}`;
+                                        })()}
+                                    </dd>
+                                </div>
+                            `:''}
+                            ${(coin.typeSeriesUris && coin.typeSeriesUris.length) ? `
+                                <div>
+                                    <dt>Type Series</dt>
+                                    <dd>${coin.typeSeriesUris.map(u=>`<a href=\"${this.escapeHtml(u)}\" target=\"_blank\" rel=\"noopener\">${this.escapeHtml(u.split('/').pop())}</a>`).join(', ')}</dd>
+                                </div>
+                            `:''}
+                        </div>
                     </div>
-                    ${coin.origin ? `
-                        <div class="info-item">
-                            <strong>Origin/Mint:</strong>
-                            <span>${coin.origin.label || coin.origin}</span>
+
+                    <div class="card">
+                        <h3>Physical Details</h3>
+                        <div class="dl-grid cols-2 dl">
+                            ${coin.material ? `
+                                <div>
+                                    <dt>Material</dt>
+                                    <dd>${formatMaterial()}</dd>
+                                </div>
+                            `:''}
+                            ${(coin.weight || coin.weight===0) ? `
+                                <div>
+                                    <dt>Weight</dt>
+                                    <dd>${formatUnit(coin.weight, 'g')}</dd>
+                                </div>
+                            `:''}
+                            ${(coin.diameter || coin.diameter===0) ? `
+                                <div>
+                                    <dt>Diameter</dt>
+                                    <dd>${formatUnit(coin.diameter, 'mm')}</dd>
+                                </div>
+                            `:''}
                         </div>
-                    ` : ''}
-                    ${coin.ruler ? `
-                        <div class="info-item">
-                            <strong>Ruler/Authority:</strong>
-                            <span>${coin.ruler.label || coin.ruler}</span>
-                        </div>
-                    ` : ''}
-                    ${coin.external_ids && coin.external_ids.nomisma ? `
-                        <div class="info-item">
-                            <strong>Nomisma:</strong>
-                            <a href="${this._normalizeNomismaUrl(coin.external_ids.nomisma)}" target="_blank" rel="noopener">${this._normalizeNomismaUrl(coin.external_ids.nomisma)}</a>
-                        </div>
-                    ` : ''}
+                    </div>
+
+                    ${(coin.obverse || coin.reverse) ? `
+                    <div class="card">
+                        <h3><span class="section-header-icon owl">🦉</span> Coin Sides</h3>
+                        ${coin.obverse ? `<div class=\"dl\"><dt>Obverse</dt><dd>${this.escapeHtml(coin.obverse)}</dd></div>`:''}
+                        ${coin.reverse ? `<div class=\"divider\"></div><div class=\"dl\"><dt>Reverse</dt><dd>${this.escapeHtml(coin.reverse)}</dd></div>`:''}
+                    </div>`:''}
+
+                    ${coin.description ? `
+                    <div class="card">
+                        <h3>Description & Notes</h3>
+                        <p class="desc-clamp" id="descText">${this.escapeHtml(coin.description)}</p>
+                        <button id="descToggle" class="show-more" aria-expanded="false" hidden>Show more</button>
+                    </div>`:''}
                 </div>
 
-                <div class="info-section">
-                    <h3>Physical Details</h3>
-                    ${coin.material ? `
-                        <div class="info-item">
-                            <strong>Material:</strong>
-                            <span>${coin.material}</span>
-                        </div>
-                    ` : ''}
-                    ${coin.weight ? `
-                        <div class="info-item">
-                            <strong>Weight:</strong>
-                            <span>${coin.weight} g</span>
-                        </div>
-                    ` : ''}
-                    ${coin.diameter ? `
-                        <div class="info-item">
-                            <strong>Diameter:</strong>
-                            <span>${coin.diameter} mm</span>
-                        </div>
-                    ` : ''}
-                    ${coin.references ? `
-                        <div class="info-item">
-                            <strong>References:</strong>
-                            <span>${coin.references}</span>
-                        </div>
-                    ` : ''}
-                </div>
+                <div class="right-col">
+                    ${(() => {
+                        // Removed duplicated period-card block
+                        return '';
+                        const wdBtn = wdUrl ? `<a class=\"btn-link\" href=\"${this.escapeHtml(wdUrl)}\" target=\"_blank\" rel=\"noopener\">🗄️ Wikidata</a>` : '';
+                        const nmBtn = nmUri ? `<a class=\"btn-link\" href=\"${this.escapeHtml(nmUri)}\" target=\"_blank\" rel=\"noopener\">🔗 Nomisma</a>` : '';
+                        console.debug('Ruler enrichment', {
+                            nomismaId: nmUri,
+                            wikidata: info?.qid || (snap?.nomisma_ruler?.wikidata) || null,
+                            wikipedia: info?.wikipedia?.title || null,
+                            fromNomismaExactMatch: !!info?.fromNomismaExactMatch
+                        });
+                        return `
+                        <div class=\"card\" id=\"ruler-card\">
+                            <h3>About the ruler</h3>
+                            <div class=\"ruler-card\">
+                                ${avatar}
+                                <div>
+                                    <div class=\"ruler-name-row\"><div class=\"ruler-name\">${label}</div> ${years?`<span class=\"years\">${years}</span>`:''}</div>
+                                    ${desc ? `<div class=\"ruler-desc clamp\">${desc}</div>` : `<div class=\"ruler-desc\" style=\"color:#6b7280\">No additional biography available.</div>`}
+                                    ${factsList.length ? `<div class=\"ruler-facts\"><ul>${factsList.join('')}</ul></div>`:''}
+                                    <div class=\"btn-group\" style=\"margin-top:10px\">${wikiBtn}${wdBtn}${nmBtn}</div>
+                                </div>
+                            </div>
+                        </div>`;
+                    })()}
 
-                <div class="info-section">
-                    <h3>Coin Sides</h3>
-                    ${coin.obverse ? `
-                        <div class="info-item">
-                            <strong>Obverse:</strong>
-                            <span>${coin.obverse}</span>
+                    ${(coin.references || (coin.typeSeriesUris && coin.typeSeriesUris.length)) ? `
+                    <div class=\"card\">
+                        <h3>References</h3>
+                        <div class=\"chips\">
+                            ${(() => {
+                                const parts = formatReferences(coin.references).split('; ').filter(Boolean);
+                                const items = [];
+                                parts.forEach(p => {
+                                    const url = /^https?:\/\//i.test(p) ? p : null;
+                                    if (url) items.push(`<span class=\"chip\"><a href=\"${this.escapeHtml(url)}\" target=\"_blank\" rel=\"noopener\">${this.escapeHtml(p)}</a><span class=\"ext\">↗</span></span>`);
+                                    else items.push(`<span class=\"chip\">${this.escapeHtml(p)}</span>`);
+                                });
+                                (coin.typeSeriesUris||[]).forEach(u => items.push(`<span class=\"chip\"><a href=\"${this.escapeHtml(u)}\" target=\"_blank\" rel=\"noopener\">${this.escapeHtml(u.split('/').pop())}</a><span class=\"ext\">↗</span></span>`));
+                                return items.join(' ');
+                            })()}
                         </div>
-                    ` : ''}
-                    ${coin.reverse ? `
-                        <div class="info-item">
-                            <strong>Reverse:</strong>
-                            <span>${coin.reverse}</span>
-                        </div>
-                    ` : ''}
+                    </div>`:''}
                 </div>
             </div>
 
-            ${coin.description ? `
-                <div class="modal-description">
-                    <h3>Description & Notes</h3>
-                    <p>${coin.description}</p>
-                </div>
-            ` : ''}
-
-            <div class="info-section">
-                <h3>Learn more</h3>
-                <button id="toggleLearnMore" class="btn-secondary">Read more</button>
-                <div id="enrichLearnMore" class="learn-more" style="display:none"></div>
-            </div>
         `;
 
         document.getElementById('coinModal').classList.remove('hidden');
@@ -2007,41 +2450,31 @@ class CoinCollection {
                 this.closeModal();
             });
         }
-        // Delete button removed from modal (bulk delete via selection bar)
-        // Learn more: collapsed by default; fetch lazily when expanded
-        const toggleBtn = document.getElementById('toggleLearnMore');
-        const host = document.getElementById('enrichLearnMore');
-        if (toggleBtn && host) {
-            toggleBtn.addEventListener('click', async () => {
-                const isHidden = host.style.display === 'none' || getComputedStyle(host).display === 'none';
-                if (isHidden) {
-                    host.style.display = 'block';
-                    toggleBtn.textContent = 'Hide';
-                    if (!coin.facts_snapshot) {
-                        host.innerHTML = '<em>Fetching information…</em>';
-                        try {
-                            await this.enrichCoin(coin.id, { force: false });
-                        } catch (_) {}
-                        const updated = this.coins.find(x => x.id === coin.id) || coin;
-                        this.renderLearnMore(updated);
-                    } else {
-                        this.renderLearnMore(coin);
-                    }
-                } else {
-                    host.style.display = 'none';
-                    toggleBtn.textContent = 'Read more';
-                }
+        const refreshBtn = document.getElementById('refreshSnapshotBtn');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', async () => {
+                refreshBtn.disabled = true; refreshBtn.textContent = 'Refreshing…';
+                try { await this.enrichCoin(coin.id, { force: true, linksOnly: false }); } catch(_) {}
+                // Re-render modal with fresh snapshot
+                this.viewCoin(coin.id);
             });
         }
+        // Delete button removed from modal (bulk delete via selection bar)
 
-        // Wire image lightbox on click
-        const modalImgs = document.querySelectorAll('.modal-images img');
+    // Wire image lightbox on click
+    const modalImgs = document.querySelectorAll('.modal-media .img-main, .modal-thumbs img');
         if (modalImgs && modalImgs.length > 0) {
             const urls = coin.images.slice();
             modalImgs.forEach((imgEl, idx) => {
                 imgEl.style.cursor = 'zoom-in';
                 imgEl.addEventListener('click', () => {
-                    this.openImageLightbox(urls, idx);
+                    // If clicking thumb, use its data index
+                    const tIdx = imgEl.getAttribute('data-thumb-index');
+                    const start = tIdx ? parseInt(tIdx,10) : idx;
+                    // Highlight selected thumb
+                    document.querySelectorAll('.modal-thumbs img').forEach(t => t.classList.remove('selected'));
+                    if (tIdx) imgEl.classList.add('selected');
+                    this.openImageLightbox(urls, start);
                 });
             });
         }
@@ -2050,6 +2483,54 @@ class CoinCollection {
         if (coin.model3D) {
             setTimeout(() => this.init3DViewer(coin.model3D), VIEWER_INIT_DELAY);
         }
+
+        // Description expander
+        const descEl = document.getElementById('descText');
+        const toggle = document.getElementById('descToggle');
+        if (descEl && toggle) {
+            // Check if clamped
+            setTimeout(() => {
+                if (descEl.scrollHeight > descEl.clientHeight + 4) toggle.hidden = false;
+            }, 0);
+            toggle.addEventListener('click', () => {
+                const expanded = toggle.getAttribute('aria-expanded') === 'true';
+                toggle.setAttribute('aria-expanded', String(!expanded));
+                if (expanded) { descEl.classList.add('desc-clamp'); toggle.textContent = 'Show more'; }
+                else { descEl.classList.remove('desc-clamp'); toggle.textContent = 'Show less'; }
+            });
+        }
+
+        // Enrich parent labels asynchronously, if present
+        (async () => {
+            try {
+                const claims = authorityInfo?.claims_parsed || null;
+                const parents = claims?.parents || null;
+                if (parents) {
+                    const labelMap = await this._fetchWikidataLabels([parents.father, parents.mother].filter(Boolean));
+                    Object.keys(labelMap).forEach(q => {
+                        document.querySelectorAll(`.wd-label[data-qid="${q}"]`).forEach(el => { el.textContent = labelMap[q]; });
+                    });
+                }
+            } catch (_) {}
+        })();
+    }
+
+    // Extract known type-series URIs or infer CRRO IDs from reference text
+    _extractTypeSeriesFromReferences(refText) {
+        if (!refText) return [];
+        const out = new Set();
+        const ocreRe = /https?:\/\/numismatics\.org\/ocre\/id\/[^\s,;\)\]]+/gi;
+        let m;
+        while ((m = ocreRe.exec(refText)) !== null) out.add(m[0]);
+        const crroRe = /https?:\/\/numismatics\.org\/crro\/id\/[^\s,;\)\]]+/gi;
+        while ((m = crroRe.exec(refText)) !== null) out.add(m[0]);
+        // Crawford / RRC numeric references -> CRRO inferred URI
+        const crawfordRe = /\b(?:RRC|Crawford)\s*(\d{1,4})([ABab]?)/g;
+        while ((m = crawfordRe.exec(refText)) !== null) {
+            const num = m[1];
+            out.add(`https://numismatics.org/crro/id/rrc-${num}`);
+        }
+        return Array.from(out);
     }
 
     // Simple lightbox with zoom and navigation
@@ -2081,7 +2562,21 @@ class CoinCollection {
         const btnPrev = overlay.querySelector('.ilb-prev');
         const btnNext = overlay.querySelector('.ilb-next');
 
+        let canZoom = true;
+        const assessZoomability = () => {
+            try {
+                const stage = overlay.querySelector('.ilb-stage');
+                const cw = stage.clientWidth, ch = stage.clientHeight;
+                const nw = imgEl.naturalWidth, nh = imgEl.naturalHeight;
+                canZoom = (nw > cw) || (nh > ch);
+                if (btnIn) btnIn.disabled = !canZoom;
+                if (btnOut) btnOut.disabled = !canZoom;
+            } catch(_) { canZoom = true; }
+        };
         const updateImg = () => {
+            imgEl.style.maxWidth = 'min(90vw, 1600px)';
+            imgEl.style.maxHeight = '90vh';
+            imgEl.style.objectFit = 'contain';
             imgEl.src = images[idx];
             scale = 1; tx = 0; ty = 0; applyTransform();
         };
@@ -2099,18 +2594,18 @@ class CoinCollection {
 
         // Events
         btnClose && btnClose.addEventListener('click', close);
-        btnIn && btnIn.addEventListener('click', () => zoomBy(0.25));
-        btnOut && btnOut.addEventListener('click', () => zoomBy(-0.25));
+    btnIn && btnIn.addEventListener('click', () => { if (canZoom) zoomBy(0.25); });
+    btnOut && btnOut.addEventListener('click', () => { if (canZoom) zoomBy(-0.25); });
         btnPrev && btnPrev.addEventListener('click', prev);
         btnNext && btnNext.addEventListener('click', next);
         overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
         const stage = overlay.querySelector('.ilb-stage');
-        stage.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? -0.2 : 0.2); }, { passive: false });
-        stage.addEventListener('mousedown', (e) => { if (scale <= 1) return; isPanning = true; startX = e.clientX - tx; startY = e.clientY - ty; stage.style.cursor = 'grabbing'; });
+        stage.addEventListener('wheel', (e) => { if (!canZoom) return; e.preventDefault(); zoomBy(e.deltaY > 0 ? -0.2 : 0.2); }, { passive: false });
+        stage.addEventListener('mousedown', (e) => { if (!canZoom || scale <= 1) return; isPanning = true; startX = e.clientX - tx; startY = e.clientY - ty; stage.style.cursor = 'grabbing'; });
         window.addEventListener('mousemove', (e) => { if (!isPanning) return; tx = e.clientX - startX; ty = e.clientY - startY; applyTransform(); });
         window.addEventListener('mouseup', () => { if (!isPanning) return; isPanning = false; stage.style.cursor = 'grab'; });
-    stage.addEventListener('dblclick', () => { if (scale === 1) { scale = 2; } else { scale = 1; tx = 0; ty = 0; } applyTransform(); });
+        stage.addEventListener('dblclick', () => { if (!canZoom) return; if (scale === 1) { scale = 2; } else { scale = 1; tx = 0; ty = 0; } applyTransform(); });
 
         const onKey = (e) => {
             if (e.key === 'Escape') close();
@@ -2121,6 +2616,7 @@ class CoinCollection {
         };
         document.addEventListener('keydown', onKey);
 
+        imgEl.addEventListener('load', assessZoomability);
         updateImg();
     }
 
@@ -2494,6 +2990,29 @@ class CoinCollection {
 // Initialize app when DOM is loaded
 document.addEventListener('DOMContentLoaded', async () => {
     await assetStorage.init().catch(() => {});
-    await loadThreeJS();
+    // Dynamically load Three.js libraries if available
+    try {
+        if (!window.THREE) {
+            // Attempt to load from CDN
+            const scripts = [
+                'https://unpkg.com/three@0.160.0/build/three.min.js',
+                'https://unpkg.com/three@0.160.0/examples/js/loaders/GLTFLoader.js',
+                'https://unpkg.com/three@0.160.0/examples/js/loaders/OBJLoader.js',
+                'https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js',
+                'https://unpkg.com/three@0.160.0/examples/js/loaders/DRACOLoader.js'
+            ];
+            for (const src of scripts) {
+                await new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+            }
+        }
+        if (window.THREE) {
+            THREE = window.THREE;
+            GLTFLoader = window.THREE.GLTFLoader || window.GLTFLoader;
+            OBJLoader = window.THREE.OBJLoader || window.OBJLoader;
+            OrbitControls = window.THREE.OrbitControls || window.OrbitControls;
+            DRACOLoader = window.THREE.DRACOLoader || window.DRACOLoader;
+            threeJsAvailable = true;
+        }
+    } catch (_) { threeJsAvailable = false; }
     new CoinCollection();
 });
