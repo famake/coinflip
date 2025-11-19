@@ -25,7 +25,7 @@
                     </div>
 
                     <div class="form-group">
-                        <label>Date/Period *</label>
+                        <label>Struck Date Range</label>
                         <div class="date-range-row">
                             <div class="date-range-item">
                                 <label for="dateStartYear">Start</label>
@@ -43,16 +43,18 @@
                                     <option value="BCE">BCE</option>
                                 </select>
                             </div>
-                            <button type="button" id="periodSearchBtn" class="btn-secondary" style="height:2.5rem;">Find Period</button>
                         </div>
                         <div style="display:flex; gap:1rem; align-items:center; margin-top:0.5rem; flex-wrap:wrap;">
                             <label style="display:flex; align-items:center; gap:0.4rem;"><input type="checkbox" id="dateApprox"> Approximate (c.)</label>
-                            <small>When Approximate is checked, only the Start year is used and shown (e.g., c. 500 BCE). Click Find Period to load suggestions.</small>
+                            <small>Checked: only Start year is shown (e.g., c. 500 BCE). This field is manual and not used for period lookup.</small>
                         </div>
-                        <input type="hidden" id="coinDate" value="">
-                        <div id="periodSuggest" class="suggest-list" style="display:none;"></div>
-                        <div id="periodChip" class="chip-wrap"></div>
-                        <div id="periodContext" class="period-context" aria-live="polite"></div>
+                        <input type="text" id="struckDateFree" placeholder="Optional free-text date note (e.g., Early issue)" style="margin-top:0.5rem;" />
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coinPeriod">Period (Nomisma link)</label>
+                        <input type="url" id="coinPeriod" placeholder="https://nomisma.org/id/roman_republic" inputmode="url">
+                        <small>Paste a Nomisma ID URL (e.g., https://nomisma.org/id/roman_republic). No lookup performed.</small>
                     </div>
 
                     <div class="form-group">
@@ -109,14 +111,37 @@
                         <label for="coinDescription">Description</label>
                         <textarea id="coinDescription" rows="4" placeholder="Describe the coin's features, inscriptions, historical significance..."></textarea>
                     </div>
-                    <div class="form-group">
-                        <label for="coinReferences">References</label>
-                        <div class="nomisma-input-wrap">
-                            <input type="text" id="coinReferences" placeholder="e.g., RIC IV 52; Crawford 123/1">
-                            <button type="button" id="refSearchBtn" class="btn-secondary" aria-haspopup="true" aria-expanded="false">Find refs ▾</button>
+                    <!-- Structured References Section -->
+                    <div class="form-group" id="structuredReferencesSection">
+                        <label>References (for lookup &amp; enrichment)</label>
+                        <small style="display:block;margin-top:0.35rem;color:#555;max-width:640px;">Add catalog references in structured format (RIC, RRC/Crawford, CPE, HGC, SNG, Other). These enable future automatic type enrichment and similar coin lookups.</small>
+                        <div id="structuredRefsList" class="structured-refs-list" aria-live="polite"></div>
+                        <button type="button" id="addStructuredRefBtn" class="btn-secondary" style="margin-top:0.75rem;">Add reference</button>
+                        <div id="structuredRefForm" class="structured-ref-form hidden" style="margin-top:0.75rem; border:1px solid #ddd; padding:0.75rem 0.9rem; border-radius:8px; background:#fafafa;">
+                            <div style="display:flex; flex-wrap:wrap; gap:0.75rem; align-items:flex-end;">
+                                <label style="flex:1 1 160px; display:flex; flex-direction:column; gap:4px;">
+                                    <span style="font-size:0.75rem; text-transform:uppercase; letter-spacing:.06em;">Authority</span>
+                                    <select id="refAuthoritySelect" style="padding:0.45rem 0.6rem;">
+                                        <option value="RIC">RIC (Imperial)</option>
+                                        <option value="RRC">RRC / Crawford (Republic)</option>
+                                        <option value="CPE">CPE (Ptolemaic)</option>
+                                        <option value="HGC">HGC (Greek)</option>
+                                        <option value="SNG">SNG (Greek)</option>
+                                        <option value="OTHER">Other catalog</option>
+                                    </select>
+                                </label>
+                                <div id="refDynamicFields" style="flex:3 1 420px; display:flex; flex-wrap:wrap; gap:0.75rem;"></div>
+                                <div style="display:flex; gap:0.5rem;">
+                                    <button type="button" id="saveStructuredRefBtn" class="btn-primary">Save</button>
+                                    <button type="button" id="cancelStructuredRefBtn" class="btn-secondary">Cancel</button>
+                                </div>
+                            </div>
+                            <small id="refHelpText" style="display:block;margin-top:0.5rem;color:#666;">Fill required fields then save.</small>
                         </div>
-                        <div id="refSearchMenu" class="actions-menu" role="menu" style="display:none; min-width:260px;"></div>
-                        <small>Standard catalog references (RIC, RSC, Sear, BMC, Crawford, OCRE, etc.)</small>
+                        <div class="form-group" style="margin-top:1rem;">
+                            <label for="otherReferenceNote">Other reference note (free text)</label>
+                            <input type="text" id="otherReferenceNote" placeholder="Use only if catalog not supported yet" />
+                        </div>
                     </div>
 
                     <div class="form-group">
@@ -136,6 +161,10 @@
                             <button type="button" id="clearImagesBtn" class="btn-secondary">Clear</button>
                         </div>
                         <small>Preferred format 1:1 (square). Use the highest resolution you have. White or neutral background is OK—viewer will auto-fit.</small>
+                        <div id="imageDraftList" class="image-draft-list" aria-live="polite" style="margin-top:8px;"></div>
+                        <div class="image-draft-actions" style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+                            <button type="button" id="swapObvRevBtn" class="btn-secondary btn-sm" title="Swap Obverse/Reverse">Swap Obv/Rev</button>
+                        </div>
                     </div>
 
                     <div class="form-group">
@@ -166,6 +195,9 @@
                     <button id="actionsBtn" class="btn-secondary" aria-haspopup="true" aria-expanded="false">Actions ▾</button>
                     <div id="actionsMenu" class="actions-menu" role="menu" style="display:none;">
                         <button id="toggleSelectionModeBtn" class="menu-item" role="menuitem" aria-pressed="false">Select for Print</button>
+                        <button type="button" id="openCompareBlankGlobalBtn" class="menu-item" role="menuitem">Open Compare</button>
+                        <button type="button" id="toggleThemeBtn" class="menu-item" role="menuitem">Dark Mode</button>
+                        <button type="button" id="storageUsageBtn" class="menu-item" role="menuitem">Storage Usage…</button>
                         <button type="button" id="exportJsonBtn" class="menu-item" role="menuitem">Export JSON</button>
                                 <button type="button" id="exportJsonLdBtn" class="menu-item" role="menuitem">Export JSON-LD</button>
                         <button type="button" id="importJsonBtn" class="menu-item" role="menuitem">Import JSON</button>
@@ -233,6 +265,139 @@
             <span class="close-modal">&times;</span>
             <div id="modalBody">
                 <!-- Coin details will be populated here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- History Explorer Overlay -->
+    <div id="historyOverlay" class="history-overlay hidden" role="dialog" aria-modal="true" tabindex="-1">
+        <div class="history-panel">
+            <div class="history-toolbar">
+                <div class="history-title">📜 Timeline Explorer</div>
+                <div class="history-actions">
+                    <button id="toggleTraceBtn" class="btn-secondary" title="Show data trace">Trace</button>
+                    <button id="closeHistoryBtn" class="btn-secondary">Close</button>
+                </div>
+            </div>
+            <div class="history-body">
+                <div class="timeline-section">
+                    <h3>Period Timeline</h3>
+                    <div id="timelineNotice" class="history-notice" style="display:none;"></div>
+                    <div id="timelineHost" class="timeline-wrap"></div>
+                </div>
+                <div class="rulers-section">
+                    <h3>Rulers</h3>
+                    <div id="rulersHost" class="rulers-wrap"></div>
+                </div>
+                <div class="events-section">
+                    <h3>Key Events</h3>
+                    <div id="eventsHost" class="events-wrap"></div>
+                </div>
+                <div id="traceSection" class="trace-section" style="display:none;">
+                    <h3>Data Trace</h3>
+                    <div id="traceHost"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Ruler Profile Overlay (reuses history panel styles) -->
+    <div id="rulerOverlay" class="history-overlay hidden" role="dialog" aria-modal="true" tabindex="-1">
+        <div class="history-panel">
+            <div class="history-toolbar">
+                <div class="history-title">👑 Ruler Profile</div>
+                <div class="history-actions">
+                    <button id="closeRulerBtn" class="btn-secondary">Close</button>
+                </div>
+            </div>
+            <div id="rulerBody" class="history-body"></div>
+        </div>
+    </div>
+
+    <!-- Compare Mode Overlay -->
+    <div id="compareOverlay" class="compare-overlay hidden" role="dialog" aria-modal="true" tabindex="-1">
+        <div class="compare-panel" id="comparePanel">
+            <div class="compare-toolbar">
+                <div class="compare-title">🪙🪙 Coin Comparison</div>
+                <div class="compare-tools">
+                    <button id="compareResetBtn" class="btn-secondary" title="Reset zoom/pan">Reset</button>
+                    <button id="compareSideObvBtn" class="btn-secondary" data-mode="obv" aria-pressed="true">Obverse</button>
+                    <button id="compareSideRevBtn" class="btn-secondary" data-mode="rev" aria-pressed="false">Reverse</button>
+                    <button id="compareFullscreenBtn" class="btn-secondary" title="Fullscreen">Fullscreen</button>
+                    <button id="closeCompareBtn" class="btn-secondary">Close</button>
+                </div>
+            </div>
+            <div class="compare-body">
+                <div class="compare-images">
+                    <div class="compare-side" id="compareSideA">
+                        <div class="compare-image-wrap" data-side="A"></div>
+                        <div class="compare-replace">
+                            <label>Replace A:</label>
+                            <select id="compareSelectA"></select>
+                        </div>
+                    </div>
+                    <div class="compare-side" id="compareSideB">
+                        <div class="compare-image-wrap" data-side="B"></div>
+                        <div class="compare-replace">
+                            <label>Replace B:</label>
+                            <select id="compareSelectB"></select>
+                        </div>
+                    </div>
+                </div>
+                <div class="compare-table-wrap">
+                    <h3>Technical & Iconography Comparison</h3>
+                    <div id="compareTableHost"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Museum Mode Overlay -->
+    <div id="museumOverlay" class="museum-overlay hidden" role="dialog" aria-modal="true" tabindex="-1">
+        <div id="museumStage" class="museum-stage">
+            <div class="museum-layout">
+                <div class="museum-panel panel-white">
+                    <div class="museum-coin-panel">
+                        <div class="museum-img-wrap">
+                            <img class="museum-img visible" alt="coin" />
+                            <img class="museum-img" alt="coin" />
+                        </div>
+                    </div>
+                    <div id="museumPlaque" class="museum-plaque"></div>
+                </div>
+            </div>
+            <div id="museumToolbar" class="museum-toolbar" aria-hidden="true">
+                <button id="museumPlayBtn" class="btn-secondary" data-playing="false" title="Play/Pause">Play</button>
+                <label class="inline-ctrl">Speed
+                    <select id="museumSpeed">
+                        <option value="5000">5s</option>
+                        <option value="10000" selected>10s</option>
+                        <option value="20000">20s</option>
+                        <option value="30000">30s</option>
+                    </select>
+                </label>
+                <label class="inline-ctrl">Background
+                    <select id="museumBg">
+                        <option value="white" selected>White</option>
+                        <option value="grey">Grey</option>
+                        <option value="black">Black</option>
+                    </select>
+                </label>
+                <label class="inline-ctrl">Face
+                    <select id="museumFace">
+                        <option value="obv" selected>Obverse</option>
+                        <option value="rev">Reverse</option>
+                    </select>
+                </label>
+                <label class="inline-ctrl">Order
+                    <select id="museumOrder">
+                        <option value="random" selected>Random</option>
+                        <option value="date">By Date</option>
+                        <option value="mint">By Mint</option>
+                        <option value="acq">By Acquisition</option>
+                    </select>
+                </label>
+                <button id="museumExitBtn" class="btn-secondary">Exit</button>
             </div>
         </div>
     </div>
