@@ -5,6 +5,7 @@ A modern, responsive web application for managing and displaying your personal c
 ## Features
 
 - **📷 Image Upload**: Upload multiple images for each coin (front, back, details)
+- **External Image URLs**: Reference optimized images hosted on a CDN or the local `/coin-images` folder instead of storing large blobs in LocalStorage
 - **3D Model Viewer**: Upload and view 3D models (.glb, .gltf, .obj) with 360° rotation
 - **Detailed Information**: Track comprehensive coin details including:
   - Name, date/period, origin/mint
@@ -53,8 +54,9 @@ npx http-server
 1. Click the **"+ Add New Coin"** button
 2. Fill in the coin details (Name and Date are required)
 3. Upload images of your coin
-4. Optionally upload a 3D model file
-5. Click **"Save Coin"** to add it to your collection
+4. (Optional) Provide external obverse/reverse image URLs. Relative paths such as `/coin-images/athens-obv.jpg` serve files from this repo's `coin-images` folder so you don't need a CDN.
+5. Optionally upload a 3D model file
+6. Click **"Save Coin"** to add it to your collection
 
 ### Viewing Coin Details
 
@@ -80,6 +82,12 @@ The 3D viewer features:
 - Manual orbit controls (click and drag)
 - Zoom in/out (scroll wheel)
 - Proper lighting and shadows
+
+### External Image URLs & `/coin-images`
+
+- Drop optimized `.jpg` or `.png` files into the `coin-images/` folder in this repository. Any static dev server (Python, `http-server`, VS Code Live Server, etc.) will expose them at `http://localhost:PORT/coin-images/...`.
+- In the form, paste either a full `https://` URL or a relative path such as `/coin-images/denarius-obv.jpg`. Those URLs take priority over uploaded files, so you can keep LocalStorage lean.
+- External images remain referenced in exports/imports, so you can host them on a CDN or keep them in the repo for offline use. Just ensure the paths stay reachable wherever you open the app.
 
 ## Technology Stack
 

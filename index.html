@@ -14,8 +14,6 @@
 
     <main>
         <section class="add-coin-section">
-            <button id="toggleFormBtn" class="btn-primary">+ Add New Coin</button>
-            
             <div id="addCoinForm" class="form-container hidden">
                 <h2 id="formTitle">Add a New Coin</h2>
                 <form id="coinForm">
@@ -168,6 +166,23 @@
                     </div>
 
                     <div class="form-group">
+                        <label>External Image URLs (optional)</label>
+                        <div class="external-image-grid">
+                            <label class="external-image-field" for="externalObvUrl">
+                                <span class="external-image-label">Obverse URL</span>
+                                <input type="text" id="externalObvUrl" placeholder="https://example.com/coin-obv.jpg" inputmode="url" spellcheck="false" autocomplete="off">
+                                <small id="externalObvHint">Relative paths like <code>/coin-images/denarius-obv.jpg</code> load from the bundled <code>coin-images</code> folder.</small>
+                            </label>
+                            <label class="external-image-field" for="externalRevUrl">
+                                <span class="external-image-label">Reverse URL</span>
+                                <input type="text" id="externalRevUrl" placeholder="https://example.com/coin-rev.jpg" inputmode="url" spellcheck="false" autocomplete="off">
+                                <small id="externalRevHint">Leave blank to keep uploads for that face. External URLs override uploaded files.</small>
+                            </label>
+                        </div>
+                        <small class="external-image-note">Use HTTPS links or relative paths (e.g. <code>/coin-images/my-coin.jpg</code>). When provided, the app skips storing large blobs in LocalStorage.</small>
+                    </div>
+
+                    <div class="form-group">
                         <label for="coin3DModel">3D Model (Optional)</label>
                         <input type="file" id="coin3DModel" accept=".glb,.gltf,.obj">
                         <small>Upload a 3D model file (.glb, .gltf, or .obj)</small>
@@ -187,21 +202,22 @@
             <div class="filters">
                 <input type="text" id="searchInput" placeholder="Search coins..." class="search-input">
                 <select id="sortSelect" class="sort-select">
-                    <option value="newest">Newest First</option>
-                    <option value="oldest">Oldest First</option>
+                    <option value="struck" selected>By Struck Date</option>
+                    <option value="newest">Recently Added (Newest)</option>
+                    <option value="oldest">Recently Added (Oldest)</option>
                     <option value="name">By Name</option>
                 </select>
                 <div class="actions-wrap">
-                    <button id="actionsBtn" class="btn-secondary" aria-haspopup="true" aria-expanded="false">Actions ▾</button>
-                    <div id="actionsMenu" class="actions-menu" role="menu" style="display:none;">
-                        <button id="toggleSelectionModeBtn" class="menu-item" role="menuitem" aria-pressed="false">Select for Print</button>
-                        <button type="button" id="openCompareBlankGlobalBtn" class="menu-item" role="menuitem">Open Compare</button>
-                        <button type="button" id="toggleThemeBtn" class="menu-item" role="menuitem">Dark Mode</button>
-                        <button type="button" id="storageUsageBtn" class="menu-item" role="menuitem">Storage Usage…</button>
-                        <button type="button" id="exportJsonBtn" class="menu-item" role="menuitem">Export JSON</button>
-                                <button type="button" id="exportJsonLdBtn" class="menu-item" role="menuitem">Export JSON-LD</button>
-                        <button type="button" id="importJsonBtn" class="menu-item" role="menuitem">Import JSON</button>
-                        <input type="file" id="importJsonFile" accept="application/json" style="display:none;" />
+                    <button type="button" id="selectionModeBtn" class="btn-secondary" aria-pressed="false">Select</button>
+                    <div class="actions-menu-wrap">
+                        <button id="actionsBtn" class="btn-secondary" aria-haspopup="true" aria-expanded="false">Actions ▾</button>
+                        <div id="actionsMenu" class="actions-menu" role="menu" style="display:none;">
+                            <button type="button" id="addCoinMenuBtn" class="menu-item" role="menuitem">Add New Coin</button>
+                            <button type="button" id="openCompareBlankGlobalBtn" class="menu-item" role="menuitem">Open Compare</button>
+                            <button type="button" id="museumModeGlobalBtn" class="menu-item" role="menuitem">Museum Mode</button>
+                            <button type="button" id="toggleThemeBtn" class="menu-item" role="menuitem">Dark Mode</button>
+                            <button type="button" id="dataManagerBtn" class="menu-item" role="menuitem">Data &amp; Storage…</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -266,6 +282,81 @@
             <div id="modalBody">
                 <!-- Coin details will be populated here -->
             </div>
+        </div>
+    </div>
+
+    <!-- Data & Storage Modal -->
+    <div id="dataModal" class="modal hidden" role="dialog" aria-modal="true">
+        <div class="modal-content data-modal">
+            <span class="close-modal" id="closeDataModal" aria-label="Close">&times;</span>
+            <h2>Data &amp; Storage</h2>
+            <p class="data-modal-lead">Review usage, export selected coins, or reset caches when you need extra space.</p>
+
+            <section class="data-panel">
+                <div class="data-panel-header">
+                    <h3>Storage Snapshot</h3>
+                    <button type="button" id="storageStatsRefreshBtn" class="btn-secondary btn-sm">Refresh</button>
+                </div>
+                <dl class="storage-stats">
+                    <div>
+                        <dt>Total used</dt>
+                        <dd data-storage-value="usage">—</dd>
+                    </div>
+                    <div>
+                        <dt>Quota</dt>
+                        <dd data-storage-value="quota">—</dd>
+                    </div>
+                    <div>
+                        <dt>Coins JSON</dt>
+                        <dd data-storage-value="coins">—</dd>
+                    </div>
+                    <div>
+                        <dt>Embedded images</dt>
+                        <dd data-storage-value="images">—</dd>
+                    </div>
+                    <div>
+                        <dt>localStorage keys</dt>
+                        <dd data-storage-value="local">—</dd>
+                    </div>
+                    <div>
+                        <dt>IndexedDB assets</dt>
+                        <dd data-storage-value="indexed">—</dd>
+                    </div>
+                </dl>
+                <small class="data-panel-note">Numbers are estimates from your browser; they may vary slightly between refreshes.</small>
+            </section>
+
+            <section class="data-panel">
+                <h3>Export Collection</h3>
+                <div class="export-scope-options">
+                    <label class="export-scope-option">
+                        <input type="radio" name="exportScope" value="all" checked>
+                        <span>Entire collection (<span data-total-count>0</span>)</span>
+                    </label>
+                    <label class="export-scope-option" data-export-selection-label>
+                        <input type="radio" name="exportScope" value="selection" id="exportScopeSelection">
+                        <span>Only selected (<span data-selection-count>0</span>)</span>
+                    </label>
+                </div>
+                <small class="data-panel-note">Use “Select for Print” on cards to build a custom export list.</small>
+                <div class="export-actions">
+                    <button type="button" id="dataExportJsonBtn" class="btn-secondary">Export JSON</button>
+                    <button type="button" id="dataExportJsonLdBtn" class="btn-secondary">Export JSON-LD</button>
+                </div>
+            </section>
+
+            <section class="data-panel">
+                <h3>Storage Maintenance</h3>
+                <p>Remove cached 3D assets, derived data, and stale previews to free up space.</p>
+                <button type="button" id="dataCleanBtn" class="btn-danger">Clean Storage…</button>
+            </section>
+
+            <section class="data-panel">
+                <h3>Import Collection</h3>
+                <p>Imports replace your current collection. Backup first if needed.</p>
+                <button type="button" id="dataImportJsonBtn" class="btn-secondary">Import JSON</button>
+                <input type="file" id="dataImportInput" accept="application/json" style="display:none;">
+            </section>
         </div>
     </div>
 
@@ -362,6 +453,10 @@
                             <img class="museum-img visible" alt="coin" />
                             <img class="museum-img" alt="coin" />
                         </div>
+                            <div class="museum-face-caption">
+                                <div class="face-label" data-museum-face-label>Obverse</div>
+                                <div class="face-text" data-museum-face-text>Tap to advance</div>
+                            </div>
                     </div>
                     <div id="museumPlaque" class="museum-plaque"></div>
                 </div>

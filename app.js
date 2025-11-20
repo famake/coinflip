@@ -123,7 +123,10 @@ class CoinCollection {
         this._editingRefIndex = -1;
         this._draftImages = [];
         this._debug = true;
+        this._searchTerm = '';
+        this._currentSort = 'struck';
         this._initPersistence();
+        this.sortCoins(this._currentSort, { skipRender: true });
         this.renderCoins();
         this.initEventListeners();
     }
@@ -149,9 +152,8 @@ class CoinCollection {
         if (!trace || !host) return;
         const total = trace.finishedAt && trace.startedAt ? Math.round(trace.finishedAt - trace.startedAt) : null;
         const lines = [];
-        if (total != null) lines.push(`<div class="t-step"><div><span class="t-em">Total</span></div><div>${total} ms</div></div>`);
-        const agg = {};
         trace.steps.forEach(s=>{ const k=s.type||'other'; agg[k]=(agg[k]||0)+(s.durationMs||0); });
+            this.cache = new Map(); // Initialize cache for storing data
         Object.keys(agg).sort((a,b)=>agg[b]-agg[a]).forEach(k=>{
             lines.push(`<div class="t-step"><div>Sum ${this.escapeHtml(k)}</div><div>${Math.round(agg[k])} ms</div></div>`);
         });
@@ -209,6 +211,22 @@ class CoinCollection {
         } else {
             this.cache.set(key, value);
         }
+    }
+
+    _coinMatchesSearch(coin) {
+        const term = String(this._searchTerm || '').trim().toLowerCase();
+        if (!term) return true;
+        const dateText = (() => {
+            const range = this._formatDateRange(coin.struck_date?.exact);
+            const note = coin.struck_date?.note || '';
+            const periodLabel = (coin.period && typeof coin.period === 'object') ? (coin.period.label || '') : (coin.period || '');
+            return [periodLabel, range, note].filter(Boolean).join(' ');
+        })();
+        const originText = (coin.origin && typeof coin.origin === 'object') ? (coin.origin.label || '') : (coin.origin || '');
+        const rulerText = (coin.ruler && typeof coin.ruler === 'object') ? (coin.ruler.label || '') : (coin.ruler || '');
+        const corpus = [coin.name || '', dateText || '', originText || '', rulerText || '', coin.description || '']
+            .map(part => part.toLowerCase());
+        return corpus.some(part => part.includes(term));
     }
 
     async _fetchPeriodEvents(qid, { rulers = null, periodRange = null, originQid = null, struckExact = null } = {}, trace = null){
@@ -383,13 +401,15 @@ LIMIT 200`;
         const cap = 15;
         const out = [];
         for (const it of merged){
-            let description = '';
+            let description = it.description || null;
             let imageUrl = it.image || null;
-            try {
-                const info = await this._enrichWikidataEntity(it.qid, 'event');
-                if (info?.wikipedia?.extract) description = info.wikipedia.extract;
-                if (!imageUrl) imageUrl = info?.wikipedia?.thumbnail?.source || null;
-            } catch(_){ }
+            if (!description || !imageUrl){
+                try {
+                    const info = await this._enrichWikidataEntity(it.qid, 'event');
+                    if (info?.wikipedia?.extract) description = info.wikipedia.extract;
+                    if (!imageUrl) imageUrl = info?.wikipedia?.thumbnail?.source || null;
+                } catch(_){ }
+            }
             out.push({ qid: it.qid, title: it.title, year: it.year, description, imageUrl });
             if (out.length >= cap) break;
         }
@@ -500,10 +520,97 @@ LIMIT 200`;
         };
     }
 
+    _normalizeExternalImageUrl(url){
+        if (typeof url !== 'string') return null;
+        const trimmed = url.trim();
+        if (!trimmed) return null;
+        if (/^https?:\/\//i.test(trimmed)) return trimmed;
+        if (/^(?:\/|\.\.\/|\.\/)[^\s]+/.test(trimmed)) return trimmed;
+        if (/^[A-Za-z0-9][A-Za-z0-9._\-\/]+$/.test(trimmed)) return trimmed;
+        return null;
+    }
+
+    _applyExternalImageOverrides(coin, { obvUrl = null, revUrl = null } = {}){
+        if (!coin || typeof coin !== 'object') return;
+        const prevObvExternal = typeof coin.externalImageUrlObv === 'string' ? coin.externalImageUrlObv : null;
+        const prevRevExternal = typeof coin.externalImageUrlRev === 'string' ? coin.externalImageUrlRev : null;
+        const obvNormalized = this._normalizeExternalImageUrl(obvUrl);
+        const revNormalized = this._normalizeExternalImageUrl(revUrl);
+        if (!coin.imageFaces || typeof coin.imageFaces !== 'object') {
+            coin.imageFaces = { obv: null, rev: null };
+        }
+        let imgs = Array.isArray(coin.images) ? coin.images.slice() : [];
+        if (obvNormalized) {
+            const prev = coin.imageFaces.obv;
+            if (prev) imgs = imgs.filter(img => img !== prev);
+            coin.externalImageUrlObv = obvNormalized;
+            coin.imageFaces.obv = obvNormalized;
+        } else {
+            coin.externalImageUrlObv = null;
+            if (prevObvExternal && coin.imageFaces.obv === prevObvExternal) {
+                coin.imageFaces.obv = null;
+            }
+        }
+        if (revNormalized) {
+            const prev = coin.imageFaces.rev;
+            if (prev) imgs = imgs.filter(img => img !== prev);
+            coin.externalImageUrlRev = revNormalized;
+            coin.imageFaces.rev = revNormalized;
+        } else {
+            coin.externalImageUrlRev = null;
+            if (prevRevExternal && coin.imageFaces.rev === prevRevExternal) {
+                coin.imageFaces.rev = null;
+            }
+        }
+        coin.images = imgs;
+    }
+
+    _hasCoinImageSource(coin){
+        if (!coin || typeof coin !== 'object') return false;
+        const hasExternal = (value)=> typeof value === 'string' && value.trim().length > 0;
+        if (hasExternal(coin.externalImageUrlObv) || hasExternal(coin.externalImageUrlRev)) return true;
+        if (Array.isArray(coin.images) && coin.images.some(hasExternal)) return true;
+        const faces = coin.imageFaces && typeof coin.imageFaces === 'object' ? coin.imageFaces : null;
+        if (!faces) return false;
+        return hasExternal(faces.obv) || hasExternal(faces.rev);
+    }
+
+    _collectCoinImageSources(coin){
+        if (!coin || typeof coin !== 'object') return [];
+        const seen = new Set();
+        const out = [];
+        const placeholder = this.PLACEHOLDER_IMAGE || null;
+        const normalize = (url)=>{
+            if (typeof url !== 'string') return null;
+            const trimmed = url.trim();
+            if (!trimmed) return null;
+            if (placeholder && trimmed === placeholder) return null;
+            return trimmed;
+        };
+        const push = (url)=>{
+            const val = normalize(url);
+            if (!val || seen.has(val)) return;
+            seen.add(val);
+            out.push(val);
+        };
+        push(coin.externalImageUrlObv);
+        push(coin.externalImageUrlRev);
+        if (coin.imageFaces && typeof coin.imageFaces === 'object') {
+            push(coin.imageFaces.obv);
+            push(coin.imageFaces.rev);
+        }
+        (Array.isArray(coin.images) ? coin.images : []).forEach(push);
+        return out;
+    }
+
     _getCoinFace(coin, face='obv'){
         const placeholder = this.PLACEHOLDER_IMAGE || '';
         if (!coin || typeof coin !== 'object') return placeholder;
         const normalize = (url)=> (typeof url === 'string' && url.trim().length) ? url : null;
+        if (face === 'obv') {
+            const externalObv = normalize(coin.externalImageUrlObv);
+            if (externalObv) return externalObv;
+        }
         const imgs = Array.isArray(coin.images) ? coin.images : [];
         const faces = (coin.imageFaces && typeof coin.imageFaces === 'object') ? coin.imageFaces : {};
         if (face === 'obv') {
@@ -515,6 +622,8 @@ LIMIT 200`;
             return any || placeholder;
         }
         if (face === 'rev') {
+            const externalRev = normalize(coin.externalImageUrlRev);
+            if (externalRev) return externalRev;
             const front = this._getCoinFace(coin, 'obv') || placeholder;
             const fromMeta = normalize(faces.rev);
             if (fromMeta && fromMeta !== front) return fromMeta;
@@ -525,6 +634,20 @@ LIMIT 200`;
             return fromMeta || front || placeholder;
         }
         return placeholder;
+    }
+
+    _resolveCoinFaces(coin){
+        const placeholder = this.PLACEHOLDER_IMAGE || '';
+        if (!coin || typeof coin !== 'object') return { obv: placeholder, rev: placeholder };
+        const front = this._getCoinFace(coin, 'obv') || placeholder;
+        let back = this._getCoinFace(coin, 'rev');
+        if (!back || back === front){
+            const imgs = Array.isArray(coin.images)? coin.images.filter(Boolean) : [];
+            const alt = imgs.find(url => typeof url === 'string' && url && url !== front);
+            if (alt) back = alt;
+        }
+        if (!back) back = front || placeholder;
+        return { obv: front, rev: back };
     }
 
     // Normalize Nomisma user-supplied URI or slug to canonical https://nomisma.org/id/<slug>
@@ -568,6 +691,8 @@ LIMIT 200`;
                     obverse: c.obverse || '',
                     reverse: c.reverse || '',
                     images: Array.isArray(c.images) ? c.images : [],
+                    externalImageUrlObv: typeof c.externalImageUrlObv === 'string' ? c.externalImageUrlObv : null,
+                    externalImageUrlRev: typeof c.externalImageUrlRev === 'string' ? c.externalImageUrlRev : null,
                     imageFaces: (c.imageFaces && typeof c.imageFaces === 'object') ? c.imageFaces : null,
                     model3D: c.model3D || null,
                     addedDate: c.addedDate || new Date().toISOString(),
@@ -739,7 +864,6 @@ LIMIT 200`;
         }
         // Parents: father (P22), mother (P25) - store QIDs only to honor gating
         const father = (claims.P22 && claims.P22[0] && claims.P22[0].mainsnak && claims.P22[0].mainsnak.datavalue && claims.P22[0].mainsnak.datavalue.value && claims.P22[0].mainsnak.datavalue.value.id) || null;
-        const mother = (claims.P25 && claims.P25[0] && claims.P25[0].mainsnak && claims.P25[0].mainsnak.datavalue && claims.P25[0].mainsnak.datavalue.value && claims.P25[0].mainsnak.datavalue.value.id) || null;
         if (father || mother) out.parents = { father, mother };
         // Spouse(s) P26
         if (claims.P26) {
@@ -752,6 +876,92 @@ LIMIT 200`;
             if (!out.dynasties.length) delete out.dynasties;
         }
         return Object.keys(out).length ? out : null;
+    }
+
+    _resolveMintCoordinates(primary, fallback) {
+        const candidates = [
+            primary?.coordinates,
+            primary?.claims_parsed?.coordinates,
+            fallback?.coordinates
+        ];
+        for (const cand of candidates) {
+            const norm = this._normalizeCoordinates(cand);
+            if (norm) return norm;
+        }
+        return null;
+    }
+
+    _normalizeCoordinates(raw) {
+        if (!raw) return null;
+        const toNum = (val) => {
+            if (val == null) return null;
+            if (typeof val === 'number') return Number.isFinite(val) ? val : null;
+            if (typeof val === 'string') {
+                const trimmed = val.trim();
+                if (!trimmed) return null;
+                const parsed = Number(trimmed);
+                return Number.isFinite(parsed) ? parsed : null;
+            }
+            if (typeof val === 'object' && val !== null && Object.prototype.hasOwnProperty.call(val, 'value')) {
+                return toNum(val.value);
+            }
+            return null;
+        };
+        let lat = null;
+        let lon = null;
+        if (Array.isArray(raw) && raw.length >= 2) {
+            lat = toNum(raw[0]);
+            lon = toNum(raw[1]);
+        } else if (typeof raw === 'string') {
+            const parts = raw.split(/[,;\s]+/).filter(Boolean);
+            if (parts.length >= 2) {
+                lat = toNum(parts[0]);
+                lon = toNum(parts[1]);
+            }
+        } else if (typeof raw === 'object') {
+            lat = toNum(raw.lat ?? raw.latitude ?? raw.latDeg ?? raw.lat_deg ?? raw.y ?? raw.latlon?.lat);
+            lon = toNum(raw.lon ?? raw.lng ?? raw.longitude ?? raw.long ?? raw.x ?? raw.latlon?.lon);
+            if ((lat == null || lon == null) && typeof raw.value === 'string') {
+                const pieces = raw.value.split(/[,;\s]+/).filter(Boolean);
+                if (pieces.length >= 2) {
+                    if (lat == null) lat = toNum(pieces[0]);
+                    if (lon == null) lon = toNum(pieces[1]);
+                }
+            }
+        }
+        if (lat == null || lon == null) return null;
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+        return { lat, lon };
+    }
+
+    _renderMintMap(coords, label = '') {
+        if (!coords) return '';
+        const lat = coords.lat;
+        const lon = coords.lon;
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return '';
+            const latStr = lat.toFixed(4);
+            const lonStr = lon.toFixed(4);
+            const latRadius = Math.abs(lat) > 55 ? 0.8 : 0.5;
+        const lonRadius = Math.abs(lat) > 55 ? 1.0 : 0.6;
+        const latMin = Math.max(-90, lat - latRadius).toFixed(4);
+        const latMax = Math.min(90, lat + latRadius).toFixed(4);
+        const lonMin = Math.max(-180, lon - lonRadius).toFixed(4);
+        const lonMax = Math.min(180, lon + lonRadius).toFixed(4);
+        const bbox = encodeURIComponent(`${lonMin},${latMin},${lonMax},${latMax}`);
+        const embedUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${latStr}%2C${lonStr}`;
+        const osmUrl = `https://www.openstreetmap.org/?mlat=${latStr}&mlon=${lonStr}#map=12/${latStr}/${lonStr}`;
+        const altLabel = label ? `Map showing mint near ${label}` : 'Map showing mint location';
+        return `
+            <div class=\"mint-map-block\">
+                <div class=\"mint-map-canvas\">
+                    <iframe class=\"mint-map-frame\" src=\"${this.escapeHtml(embedUrl)}\" title=\"${this.escapeHtml(altLabel)}\" loading=\"lazy\" referrerpolicy=\"no-referrer-when-downgrade\"></iframe>
+                </div>
+                <div class=\"mint-map-meta\">
+                    <span class=\"mint-map-coords\">Lat ${latStr}, Lon ${lonStr}</span>
+                    <a class=\"mint-map-link\" href=\"${this.escapeHtml(osmUrl)}\" target=\"_blank\" rel=\"noopener\">Open map</a>
+                </div>
+            </div>`;
     }
 
     async _enrichNomisma(idOrUrl, trace = null) {
@@ -827,6 +1037,16 @@ LIMIT 200`;
             const n = parseFloat(String(v));
             return isNaN(n) ? null : n;
         };
+        const latKeys = ['http://www.w3.org/2003/01/geo/wgs84_pos#lat','geo:lat','lat','latitude'];
+        const lonKeys = ['http://www.w3.org/2003/01/geo/wgs84_pos#long','geo:long','lon','long','longitude'];
+        const readCoordsFromNode = (n) => {
+            if (!n) return null;
+            const latVal = getNum(pickProp(n, latKeys));
+            const lonVal = getNum(pickProp(n, lonKeys));
+            if (latVal == null || lonVal == null) return null;
+            if (!Number.isFinite(latVal) || !Number.isFinite(lonVal)) return null;
+            return { lat: latVal, lon: lonVal };
+        };
         // Accept both expanded and compacted JSON-LD keys
         const label = getEn(pickProp(node, ['http://www.w3.org/2004/02/skos/core#prefLabel','skos:prefLabel','label'])) || null;
         const definition = getEn(pickProp(node, ['http://www.w3.org/2004/02/skos/core#definition','skos:definition','http://www.w3.org/2004/02/skos/core#scopeNote','skos:scopeNote'])) || null;
@@ -859,10 +1079,34 @@ LIMIT 200`;
         }
         // Debug exactMatch scan (include chosenUrl)
         try { console.debug('Nomisma exactMatch scan', { nomismaId: baseUrl, nodeId: node['@id'], exactMatches: rawExactMatches, chosenUrl, chosenQid: wikidata }); } catch(_){}
-        // Coordinates (common in Nomisma with WGS84)
-        const lat = getNum(pickProp(node, ['http://www.w3.org/2003/01/geo/wgs84_pos#lat','geo:lat'])) || null;
-        const lon = getNum(pickProp(node, ['http://www.w3.org/2003/01/geo/wgs84_pos#long','geo:long'])) || null;
-        const info = { uri: baseUrl, label, definition, wikidata, coordinates: (lat != null && lon != null) ? { lat, lon } : null };
+        let coords = readCoordsFromNode(node);
+        let coordSource = coords ? 'primary-node' : null;
+        if (!coords) {
+            const spatial = graph.find(n => {
+                const id = n['@id'] || '';
+                if (!idMatches(id)) return false;
+                const t = Array.isArray(n['@type']) ? n['@type'] : (n['@type'] ? [n['@type']] : []);
+                return t.some(val => {
+                    const s = String(val).toLowerCase();
+                    return s.includes('spatial') || s.includes('geo') || s.includes('place');
+                });
+            });
+            coords = readCoordsFromNode(spatial);
+            if (coords) coordSource = 'spatial-node';
+        }
+        if (!coords) {
+            for (const n of graph) {
+                const val = readCoordsFromNode(n);
+                if (val) { coords = val; coordSource = 'graph-fallback'; break; }
+            }
+        }
+        const info = { uri: baseUrl, label, definition, wikidata, coordinates: coords || null };
+        if (this._debug) {
+            try {
+                if (coords) console.debug('Nomisma coordinates resolved', { nomismaId: baseUrl, source: coordSource, lat: coords.lat, lon: coords.lon });
+                else console.debug('Nomisma coordinates missing', { nomismaId: baseUrl, label });
+            } catch(_) {}
+        }
         this.setCache(`nomisma:${baseUrl}`, info);
         this._tracePush(trace, { type:'nomisma', label:`enrich ${slug}`, durationMs: Math.round((window.performance?.now?.()||Date.now()) - t0All), note: wikidata?`wd:${wikidata}`:'' });
         return info;
@@ -1033,19 +1277,6 @@ LIMIT 200`;
 
     // Initialize event listeners
     initEventListeners() {
-        // Toggle form visibility; if opening and not editing, reset to a clean add form
-        document.getElementById('toggleFormBtn').addEventListener('click', () => {
-            const formWrap = document.getElementById('addCoinForm');
-            const willShow = formWrap.classList.contains('hidden');
-            formWrap.classList.toggle('hidden');
-            if (willShow && !this.editingCoinId) {
-                this.resetFormToAddMode();
-                // Show again after reset collapsed it
-                document.getElementById('addCoinForm').classList.remove('hidden');
-            }
-            if (willShow) this._initReferenceUI();
-        });
-
         // Form submission
         document.getElementById('coinForm').addEventListener('submit', (e) => {
             e.preventDefault();
@@ -1163,45 +1394,104 @@ LIMIT 200`;
         });
 
         // Sort functionality
-        document.getElementById('sortSelect').addEventListener('change', (e) => {
-            this.sortCoins(e.target.value);
-        });
+        const sortSelect = document.getElementById('sortSelect');
+        if (sortSelect) {
+            sortSelect.addEventListener('change', (e) => {
+                this.sortCoins(e.target.value);
+            });
+            sortSelect.value = this._currentSort || 'struck';
+        }
+
+        const selectionModeBtn = document.getElementById('selectionModeBtn');
+        if (selectionModeBtn) {
+            const syncSelectionBtn = () => selectionModeBtn.setAttribute('aria-pressed', String(document.body.classList.contains('selection-mode')));
+            syncSelectionBtn();
+            selectionModeBtn.addEventListener('click', () => {
+                document.body.classList.toggle('selection-mode');
+                syncSelectionBtn();
+            });
+        }
 
         // Actions dropdown (Select for Print / Export / Import)
         const actionsBtn = document.getElementById('actionsBtn');
         const actionsMenu = document.getElementById('actionsMenu');
-        const selModeBtn = document.getElementById('toggleSelectionModeBtn');
+        const hideActionsMenu = () => {
+            if (actionsMenu) actionsMenu.style.display = 'none';
+            if (actionsBtn) actionsBtn.setAttribute('aria-expanded', 'false');
+        };
         if (actionsBtn && actionsMenu) {
-            const hideMenu = () => { actionsMenu.style.display = 'none'; actionsBtn.setAttribute('aria-expanded', 'false'); };
             const showMenu = () => { actionsMenu.style.display = 'block'; actionsBtn.setAttribute('aria-expanded', 'true'); };
             actionsBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const isOpen = actionsMenu.style.display === 'block';
-                if (isOpen) hideMenu(); else showMenu();
+                if (isOpen) hideActionsMenu(); else showMenu();
             });
             document.addEventListener('click', (e) => {
-                if (!actionsMenu.contains(e.target) && e.target !== actionsBtn) hideMenu();
-            });
-        }
-        // Selection mode toggle in dropdown
-        if (selModeBtn) {
-            selModeBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const isOn = document.body.classList.toggle('selection-mode');
-                selModeBtn.setAttribute('aria-pressed', String(isOn));
-                selModeBtn.textContent = isOn ? 'Done Selecting' : 'Select for Print';
-                const actionsMenu = document.getElementById('actionsMenu'); if (actionsMenu) actionsMenu.style.display = 'none';
-                const actionsBtn = document.getElementById('actionsBtn'); if (actionsBtn) actionsBtn.setAttribute('aria-expanded', 'false');
+                if (!actionsMenu.contains(e.target) && e.target !== actionsBtn) hideActionsMenu();
             });
         }
 
-        // Import/Export buttons
-        const exportBtnJson = document.getElementById('exportJsonBtn');
-    const exportBtnJsonLd = document.getElementById('exportJsonLdBtn');
-        const importBtnJson = document.getElementById('importJsonBtn');
-        const importFile = document.getElementById('importJsonFile');
-    if (exportBtnJson) exportBtnJson.addEventListener('click', () => this.exportCollection());
-    if (exportBtnJsonLd) exportBtnJsonLd.addEventListener('click', () => this.exportCollectionJsonLd());
+        const addCoinMenuBtn = document.getElementById('addCoinMenuBtn');
+        if (addCoinMenuBtn) {
+            addCoinMenuBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.openAddCoinForm();
+                hideActionsMenu();
+            });
+        }
+
+        // Data & storage center
+        const dataManagerBtn = document.getElementById('dataManagerBtn');
+        const dataModal = document.getElementById('dataModal');
+        const closeDataModalBtn = document.getElementById('closeDataModal');
+        if (dataManagerBtn) {
+            dataManagerBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.openDataModal();
+                hideActionsMenu();
+            });
+        }
+        if (closeDataModalBtn) closeDataModalBtn.addEventListener('click', () => this.closeDataModal());
+        if (dataModal) {
+            dataModal.addEventListener('click', (e) => {
+                if (e.target === dataModal) this.closeDataModal();
+            });
+        }
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const modal = document.getElementById('dataModal');
+                if (modal && !modal.classList.contains('hidden')) this.closeDataModal();
+            }
+        });
+
+        const refreshStatsBtn = document.getElementById('storageStatsRefreshBtn');
+        if (refreshStatsBtn) refreshStatsBtn.addEventListener('click', () => this._loadStorageStats());
+
+        const exportBtnJson = document.getElementById('dataExportJsonBtn');
+        if (exportBtnJson) {
+            exportBtnJson.addEventListener('click', () => {
+                const scope = this._getSelectedExportScope();
+                if (scope === 'selection' && (!this.selectedForPrint || this.selectedForPrint.size === 0)) {
+                    alert('Select at least one coin to export.');
+                    return;
+                }
+                this.exportCollection({ scope });
+            });
+        }
+        const exportBtnJsonLd = document.getElementById('dataExportJsonLdBtn');
+        if (exportBtnJsonLd) {
+            exportBtnJsonLd.addEventListener('click', () => {
+                const scope = this._getSelectedExportScope();
+                if (scope === 'selection' && (!this.selectedForPrint || this.selectedForPrint.size === 0)) {
+                    alert('Select at least one coin to export.');
+                    return;
+                }
+                this.exportCollectionJsonLd({ scope });
+            });
+        }
+
+        const importBtnJson = document.getElementById('dataImportJsonBtn');
+        const importFile = document.getElementById('dataImportInput');
         if (importBtnJson && importFile) {
             importBtnJson.addEventListener('click', () => importFile.click());
             importFile.addEventListener('change', async (e) => {
@@ -1215,44 +1505,29 @@ LIMIT 200`;
             });
         }
 
+        const cleanStorageBtn = document.getElementById('dataCleanBtn');
+        if (cleanStorageBtn) {
+            cleanStorageBtn.addEventListener('click', () => {
+                this._promptStorageCleanup();
+            });
+        }
+
         // Open Compare from overview Actions menu
         const openCompareBlankGlobalBtn = document.getElementById('openCompareBlankGlobalBtn');
         if (openCompareBlankGlobalBtn) {
             openCompareBlankGlobalBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.openCompareBlank();
-                const actionsMenu = document.getElementById('actionsMenu'); if (actionsMenu) actionsMenu.style.display = 'none';
-                const actionsBtn = document.getElementById('actionsBtn'); if (actionsBtn) actionsBtn.setAttribute('aria-expanded', 'false');
+                hideActionsMenu();
             });
         }
 
-        // Storage usage diagnostics
-        const storageBtn = document.getElementById('storageUsageBtn');
-        if (storageBtn) {
-            storageBtn.addEventListener('click', async (e)=>{
+        const museumModeGlobalBtn = document.getElementById('museumModeGlobalBtn');
+        if (museumModeGlobalBtn) {
+            museumModeGlobalBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const actionsMenu = document.getElementById('actionsMenu'); if (actionsMenu) actionsMenu.style.display = 'none';
-                const actionsBtn = document.getElementById('actionsBtn'); if (actionsBtn) actionsBtn.setAttribute('aria-expanded', 'false');
-                let usage = 0, quota = 0, idbBytes = 0, lsBytes = 0, coinsBytes = 0, imagesBytes = 0;
-                try {
-                    const est = await (navigator.storage && navigator.storage.estimate ? navigator.storage.estimate() : Promise.resolve({usage:0, quota:0}));
-                    usage = est.usage||0; quota = est.quota||0;
-                } catch(_){}
-                try {
-                    const json = JSON.stringify(this.coins);
-                    coinsBytes = new Blob([json]).size;
-                    imagesBytes = this.coins.reduce((sum,c)=> sum + (Array.isArray(c.images)? c.images.reduce((s,u)=> s + Math.ceil((u.length||0)*3/4), 0) : 0), 0);
-                } catch(_){}
-                try {
-                    idbBytes = await assetStorage.estimateUsage();
-                } catch(_){}
-                try {
-                    // localStorage rough
-                    let total = 0; for (let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); total += (k?k.length:0) + (localStorage.getItem(k)||'').length; }
-                    lsBytes = Math.ceil(total*2); // UTF-16 approx
-                } catch(_){}
-                const pct = quota? ((usage/quota)*100).toFixed(1) : '—';
-                alert(`Storage usage\n\nEstimated total: ${(usage/1024/1024).toFixed(2)} MB of ${(quota/1024/1024).toFixed(2)} MB (${pct}%)\n- Coins JSON: ${(coinsBytes/1024/1024).toFixed(2)} MB\n- Images (base64 in coins): ${(imagesBytes/1024/1024).toFixed(2)} MB\n- localStorage (all keys): ${(lsBytes/1024/1024).toFixed(2)} MB\n- IndexedDB assets (3D etc.): ${(idbBytes/1024/1024).toFixed(2)} MB`);
+                this.openMuseumFromOverview();
+                hideActionsMenu();
             });
         }
 
@@ -1276,8 +1551,7 @@ LIMIT 200`;
                 const next = cur === 'dark' ? 'light' : 'dark';
                 applyTheme(next);
                 try { localStorage.setItem('theme', next); } catch (_) {}
-                const actionsMenu = document.getElementById('actionsMenu'); if (actionsMenu) actionsMenu.style.display = 'none';
-                const actionsBtn = document.getElementById('actionsBtn'); if (actionsBtn) actionsBtn.setAttribute('aria-expanded', 'false');
+                hideActionsMenu();
             });
         }
 
@@ -1363,6 +1637,49 @@ LIMIT 200`;
         this._initReferenceUI();
     }
 
+    async _promptStorageCleanup(){
+        const coinCount = Array.isArray(this.coins) ? this.coins.length : 0;
+        const modelCount = this.coins.reduce((sum, coin) => sum + (coin?.model3D?.assetId ? 1 : 0), 0);
+        let jsonBytes = 0;
+        try {
+            jsonBytes = JSON.stringify(this.coins || []).length;
+        } catch(_){ jsonBytes = 0; }
+        let idbBytes = null;
+        try {
+            idbBytes = await assetStorage.estimateUsage();
+        } catch(_){ idbBytes = null; }
+        const jsonMb = (jsonBytes/1024/1024) || 0;
+        const idbMb = idbBytes!=null ? (idbBytes/1024/1024) : null;
+        const warningLines = [
+            'You are about to permanently delete:',
+            `• ${coinCount} coin record${coinCount===1?'':'s'} including embedded images (~${jsonMb.toFixed(2)} MB in localStorage)`,
+            `• ${modelCount} stored 3D model${modelCount===1?'':'s'}${idbMb!=null?` (~${idbMb.toFixed(2)} MB in IndexedDB)`:''}`,
+            '• App preferences (e.g., dark mode) stored in localStorage'
+        ];
+        const confirmMsg = `${warningLines.join('\n')}\n\nThis action cannot be undone. Continue?`;
+        if (!window.confirm(confirmMsg)) return;
+        await this._executeStorageCleanup();
+    }
+
+    async _executeStorageCleanup(){
+        try {
+            await assetStorage.clearAll();
+        } catch (err) {
+            console.warn('Failed to clear asset storage', err);
+        }
+        try { localStorage.removeItem('coinCollection'); } catch(_){ }
+        try { localStorage.removeItem('theme'); } catch(_){ }
+        this.coins = [];
+        this.selectedForPrint.clear();
+        this._draftImages = [];
+        this._draftStructuredRefs = [];
+        this._editingRefIndex = -1;
+        this.cache?.clear?.();
+        this.renderCoins();
+        this.resetFormToAddMode();
+        alert('Storage cleaned. All coins, embedded images, and stored models have been removed.');
+    }
+
     _updateMaterialLinkInfo(){
         const host = document.getElementById('materialLinkInfo');
         if (!host) return;
@@ -1411,8 +1728,13 @@ LIMIT 200`;
         return null;
     }
 
-    // Build JSON-LD graph for the whole collection and download
-    exportCollectionJsonLd() {
+    // Build JSON-LD graph for the chosen scope and download
+    exportCollectionJsonLd({ scope = 'all' } = {}) {
+        const coins = this._getCoinsForScope(scope);
+        if (scope === 'selection' && coins.length === 0) {
+            alert('Select at least one coin to export.');
+            return;
+        }
         try {
             const context = {
                 rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
@@ -1489,7 +1811,7 @@ LIMIT 200`;
                 if (Array.isArray(coin.typeSeriesUris)) coin.typeSeriesUris.forEach(u=> out.add(u));
                 return Array.from(out);
             };
-            for (const coin of this.coins) {
+            for (const coin of coins) {
                 const coinId = `urn:coinflip:coin:${coin.id}`;
                 const node = { '@id': coinId, '@type': ['nmo:NumismaticObject'] };
                 if (coin.name) node['dcterms:title'] = [{ '@value': String(coin.name) }];
@@ -1658,6 +1980,8 @@ LIMIT 200`;
     // Enrichment toggles removed; enrichment now automatic based on linked fields.
         document.getElementById('coinObverse').value = coin.obverse || '';
         document.getElementById('coinReverse').value = coin.reverse || '';
+        const extObvInput = document.getElementById('externalObvUrl'); if (extObvInput) extObvInput.value = coin.externalImageUrlObv || '';
+        const extRevInput = document.getElementById('externalRevUrl'); if (extRevInput) extRevInput.value = coin.externalImageUrlRev || '';
         // Initialize image draft list from existing images, preserving first=obv, second=rev
         try {
             const imagesArr = Array.isArray(coin.images)? coin.images : [];
@@ -1704,6 +2028,8 @@ LIMIT 200`;
         const matSel = document.getElementById('coinMaterialSelect'); if (matSel) matSel.value='';
         const matOther = document.getElementById('coinMaterialOther'); if (matOther) { matOther.value=''; matOther.style.display='none'; }
         const matInfo = document.getElementById('materialLinkInfo'); if (matInfo) matInfo.innerHTML='';
+        const extObvInput = document.getElementById('externalObvUrl'); if (extObvInput) extObvInput.value='';
+        const extRevInput = document.getElementById('externalRevUrl'); if (extRevInput) extRevInput.value='';
         // Clear reference menu any leftover
         const refMenu = document.getElementById('refSearchMenu'); if (refMenu) refMenu.style.display='none';
         this._editingRefIndex = -1;
@@ -1715,14 +2041,29 @@ LIMIT 200`;
         const imgHost = document.getElementById('imageDraftList'); if (imgHost) imgHost.innerHTML='';
     }
 
-    // Export all coins to a downloadable JSON file
-    exportCollection() {
+    openAddCoinForm() {
+        this.resetFormToAddMode();
+        const form = document.getElementById('addCoinForm');
+        if (form) {
+            form.classList.remove('hidden');
+            this._initReferenceUI();
+            try { form.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {}
+        }
+    }
+
+    // Export coins to a downloadable JSON file
+    exportCollection({ scope = 'all' } = {}) {
+        const coins = this._getCoinsForScope(scope);
+        if (scope === 'selection' && coins.length === 0) {
+            alert('Select at least one coin to export.');
+            return;
+        }
         try {
             const payload = {
                 version: 1,
                 exportedAt: new Date().toISOString(),
-                count: this.coins.length,
-                coins: this.coins
+                count: coins.length,
+                coins
             };
             const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
@@ -1782,6 +2123,8 @@ LIMIT 200`;
                     description: c.description || '',
                     references: c.references || '',
                     referencesStructured,
+                    externalImageUrlObv: typeof c.externalImageUrlObv === 'string' ? c.externalImageUrlObv : null,
+                    externalImageUrlRev: typeof c.externalImageUrlRev === 'string' ? c.externalImageUrlRev : null,
                     obverse: c.obverse || '',
                     reverse: c.reverse || '',
                     images: Array.isArray(c.images) ? c.images : [],
@@ -1839,6 +2182,18 @@ LIMIT 200`;
         const referencesFree = (document.getElementById('otherReferenceNote')?.value) || '';
         const obverse = document.getElementById('coinObverse').value;
         const reverse = document.getElementById('coinReverse').value;
+        const externalObvRaw = (document.getElementById('externalObvUrl')?.value || '').trim();
+        const externalRevRaw = (document.getElementById('externalRevUrl')?.value || '').trim();
+        const externalObvUrl = this._normalizeExternalImageUrl(externalObvRaw);
+        const externalRevUrl = this._normalizeExternalImageUrl(externalRevRaw);
+        if (externalObvRaw && !externalObvUrl) {
+            alert('Obverse external image URL must be an https:// link or a relative path such as /coin-images/obv.jpg.');
+            return;
+        }
+        if (externalRevRaw && !externalRevUrl) {
+            alert('Reverse external image URL must be an https:// link or a relative path such as /coin-images/rev.jpg.');
+            return;
+        }
 
         const imageFiles = document.getElementById('coinImages').files;
         const modelFile = document.getElementById('coin3DModel').files[0];
@@ -1878,6 +2233,11 @@ LIMIT 200`;
                     this._updateCoinImageFaces(coin, this._draftImages);
                 }
             } catch(_){}
+
+            this._applyExternalImageOverrides(coin, { obvUrl: externalObvUrl, revUrl: externalRevUrl });
+            if (!externalObvUrl && !externalRevUrl) {
+                this._updateCoinImageFaces(coin, Array.isArray(this._draftImages) ? this._draftImages : null);
+            }
 
             // Replace model if a new one is provided; cleanup old asset
             let newAssetId = null;
@@ -1970,6 +2330,11 @@ LIMIT 200`;
                 if (base64) coin.images.push(base64);
             }
             this._updateCoinImageFaces(coin);
+        }
+
+        this._applyExternalImageOverrides(coin, { obvUrl: externalObvUrl, revUrl: externalRevUrl });
+        if (!externalObvUrl && !externalRevUrl) {
+            this._updateCoinImageFaces(coin, Array.isArray(this._draftImages) ? this._draftImages : null);
         }
 
         // Process 3D model (store in IndexedDB)
@@ -2758,21 +3123,34 @@ LIMIT 200`;
 
     // Render all coins
     renderCoins() {
+        const activeSort = this._currentSort || 'struck';
+        this._sortCoinsInPlace(activeSort);
         const grid = document.getElementById('coinsGrid');
         const emptyState = document.getElementById('emptyState');
 
         if (this.coins.length === 0) {
             grid.innerHTML = '';
+            emptyState.innerHTML = '<p>🪙 Your collection is empty. Add your first coin to get started!</p>';
             emptyState.style.display = 'block';
+            this._updateExportScopeState();
+            return;
+        }
+
+        const visibleCoins = this.coins.filter(coin => this._coinMatchesSearch(coin));
+        if (visibleCoins.length === 0) {
+            grid.innerHTML = '';
+            emptyState.innerHTML = '<p>No coins match your search.</p>';
+            emptyState.style.display = 'block';
+            this._updateExportScopeState();
             return;
         }
 
         emptyState.style.display = 'none';
-    grid.innerHTML = this.coins.map(coin => this.createCoinCard(coin)).join('');
+        grid.innerHTML = visibleCoins.map(coin => this.createCoinCard(coin)).join('');
     // (Compare buttons removed)
 
         // Add event listeners to cards (full-card click and print select only)
-        this.coins.forEach(coin => {
+        visibleCoins.forEach(coin => {
             const sel = document.getElementById(`select-${coin.id}`);
             if (sel) {
                 sel.addEventListener('change', (e) => {
@@ -2793,25 +3171,52 @@ LIMIT 200`;
                 });
             }
         });
+        this._updateExportScopeState();
+    }
+
+    _sortCoinsInPlace(sortBy = 'struck'){
+        const mode = sortBy || 'struck';
+        switch (mode) {
+            case 'newest':
+                this.coins.sort((a, b) => new Date(b.addedDate) - new Date(a.addedDate));
+                break;
+            case 'oldest':
+                this.coins.sort((a, b) => new Date(a.addedDate) - new Date(b.addedDate));
+                break;
+            case 'name':
+                this.coins.sort((a, b) => (a.name||'').localeCompare(b.name||''));
+                break;
+            case 'struck':
+            default:
+                this.coins.sort((a, b) => {
+                    const aVal = this._getStruckDateSortValue(a);
+                    const bVal = this._getStruckDateSortValue(b);
+                    if (aVal !== bVal) return aVal - bVal;
+                    return (a.name||'').localeCompare(b.name||'');
+                });
+                break;
+        }
+        return mode;
     }
 
     // Create HTML for a coin card
     createCoinCard(coin) {
-    const frontImg = this._getCoinFace(coin, 'obv');
-    const backImg = this._getCoinFace(coin, 'rev') || frontImg;
+    const faces = this._resolveCoinFaces(coin);
+    const frontImgEsc = this.escapeHtml(faces.obv || this.PLACEHOLDER_IMAGE || '');
+    const backImgEsc = this.escapeHtml(faces.rev || faces.obv || this.PLACEHOLDER_IMAGE || '');
         const checked = this.selectedForPrint.has(coin.id) ? 'checked' : '';
         const selectedCls = this.selectedForPrint.has(coin.id) ? ' selected' : '';
-    const dateText = (()=>{ const range=this._formatDateRange(coin.struck_date?.exact); const note=coin.struck_date?.note||''; const periodLabel=(typeof coin.period==='object'? coin.period.label : (coin.period||'')); return [periodLabel, range, note].filter(Boolean).join(' '); })();
-        const originText = (coin.origin && typeof coin.origin === 'object') ? (coin.origin.label || '') : (coin.origin || '');
-        const rulerText = (coin.ruler && typeof coin.ruler === 'object') ? (coin.ruler.label || '') : (coin.ruler || '');
+    const dateText = (()=>{ const range=this._formatDateRange(coin.struck_date?.exact); const note=coin.struck_date?.note||''; const periodLabel=(coin.period && typeof coin.period==='object'? (coin.period.label||'') : (coin.period||'')); return [periodLabel, range, note].filter(Boolean).join(' '); })();
+        const originText = (coin.origin && typeof coin.origin === 'object') ? (coin.origin?.label || '') : (coin.origin || '');
+        const rulerText = (coin.ruler && typeof coin.ruler === 'object') ? (coin.ruler?.label || '') : (coin.ruler || '');
         
         return `
             <div class="coin-card${selectedCls}" data-card-id="${coin.id}">
                 <div class="coin-card-images">
                     <div class="coin-3d" aria-hidden="true">
                         <div class="coin-rotator">
-                            <img class="coin-face coin-front" src="${frontImg}" alt="${coin.name}">
-                            <img class="coin-face coin-back" src="${backImg}" alt="${coin.name} (reverse)">
+                            <img class="coin-face coin-front" src="${frontImgEsc}" alt="${coin.name}">
+                            <img class="coin-face coin-back" src="${backImgEsc}" alt="${coin.name} (reverse)">
                         </div>
                     </div>
                     
@@ -2820,7 +3225,7 @@ LIMIT 200`;
                 <div class="coin-card-content">
                     <h3>${coin.name}</h3>
                     <label class="print-select">
-                        <input id="select-${coin.id}" type="checkbox" ${checked} /> select
+                        <input id="select-${coin.id}" type="checkbox" ${checked} /> Select
                     </label>
                     <div class="coin-info">
                         <div class="coin-info-item">
@@ -2846,6 +3251,120 @@ LIMIT 200`;
         `;
     }
 
+    _getCoinsForScope(scope = 'all') {
+        if (scope === 'selection') {
+            const hasSelection = this.selectedForPrint && this.selectedForPrint.size > 0;
+            if (!hasSelection) return [];
+            const selectedIds = new Set(this.selectedForPrint);
+            return this.coins.filter(c => selectedIds.has(c.id));
+        }
+        return this.coins.slice();
+    }
+
+    _getSelectedExportScope() {
+        const scoped = document.querySelector('input[name="exportScope"]:checked');
+        return scoped ? scoped.value : 'all';
+    }
+
+    _updateExportScopeState() {
+        const totalNode = document.querySelector('[data-total-count]');
+        if (totalNode) totalNode.textContent = String(this.coins.length);
+        const selectedCount = this.selectedForPrint ? this.selectedForPrint.size : 0;
+        const selectedNode = document.querySelector('[data-selection-count]');
+        if (selectedNode) selectedNode.textContent = String(selectedCount);
+        const selectionLabel = document.querySelector('[data-export-selection-label]');
+        const selectionRadio = document.getElementById('exportScopeSelection');
+        const hasSelection = selectedCount > 0;
+        if (selectionRadio) {
+            selectionRadio.disabled = !hasSelection;
+            if (!hasSelection && selectionRadio.checked) {
+                const fullRadio = document.querySelector('input[name="exportScope"][value="all"]');
+                if (fullRadio) fullRadio.checked = true;
+            }
+        }
+        if (selectionLabel) selectionLabel.classList.toggle('disabled', !hasSelection);
+    }
+
+    _formatBytes(bytes) {
+        if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '—';
+        if (bytes < 1024) return `${Math.round(bytes)} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+    }
+
+    async _gatherStorageStats() {
+        const stats = { usage: null, quota: null, idbBytes: 0, lsBytes: 0, coinsBytes: 0, imagesBytes: 0 };
+        try {
+            if (navigator.storage && navigator.storage.estimate) {
+                const est = await navigator.storage.estimate();
+                stats.usage = est?.usage ?? null;
+                stats.quota = est?.quota ?? null;
+            }
+        } catch (_) {}
+        try {
+            const json = JSON.stringify(this.coins);
+            stats.coinsBytes = new Blob([json]).size;
+            stats.imagesBytes = this.coins.reduce((sum, coin) => {
+                if (!Array.isArray(coin.images)) return sum;
+                return sum + coin.images.reduce((inner, img) => inner + Math.ceil(((img?.length || 0) * 3) / 4), 0);
+            }, 0);
+        } catch (_) {}
+        try {
+            stats.idbBytes = await assetStorage.estimateUsage();
+        } catch (_) {}
+        try {
+            let total = 0;
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                total += (key ? key.length : 0) + ((localStorage.getItem(key) || '').length);
+            }
+            stats.lsBytes = Math.ceil(total * 2);
+        } catch (_) {}
+        return stats;
+    }
+
+    async _loadStorageStats() {
+        const fields = document.querySelectorAll('[data-storage-value]');
+        fields.forEach(node => { node.textContent = '…'; });
+        const stats = await this._gatherStorageStats();
+        this._renderStorageStats(stats);
+    }
+
+    _renderStorageStats(stats = {}) {
+        const setField = (name, text) => {
+            const el = document.querySelector(`[data-storage-value="${name}"]`);
+            if (el) el.textContent = text;
+        };
+        const usageStr = this._formatBytes(stats.usage);
+        const quotaStr = this._formatBytes(stats.quota);
+        const pct = (typeof stats.usage === 'number' && typeof stats.quota === 'number' && stats.quota > 0)
+            ? `${((stats.usage / stats.quota) * 100).toFixed(1)}%`
+            : null;
+        setField('usage', pct ? `${usageStr} (${pct})` : usageStr);
+        setField('quota', quotaStr);
+        setField('coins', this._formatBytes(stats.coinsBytes));
+        setField('images', this._formatBytes(stats.imagesBytes));
+        setField('local', this._formatBytes(stats.lsBytes));
+        setField('indexed', this._formatBytes(stats.idbBytes));
+    }
+
+    openDataModal() {
+        const modal = document.getElementById('dataModal');
+        if (!modal) return;
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+        this._updateExportScopeState();
+        this._loadStorageStats();
+    }
+
+    closeDataModal() {
+        const modal = document.getElementById('dataModal');
+        if (!modal) return;
+        if (modal.classList.contains('hidden')) return;
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+    }
+
     // Update floating print bar visibility and count
     updatePrintBar() {
         const bar = document.getElementById('printBar');
@@ -2853,6 +3372,7 @@ LIMIT 200`;
         if (!bar) return;
         bar.querySelector('[data-count]').textContent = String(count);
         bar.style.display = count > 0 ? 'flex' : 'none';
+        this._updateExportScopeState();
     }
 
     // View coin details in modal
@@ -2986,18 +3506,38 @@ LIMIT 200`;
         // Conflict detection placeholder: compare user-entered vs authoritative enriched values
         const conflicts = [];
         const norm = s => String(s||'').trim().toLowerCase();
-        const userAuthority = (typeof coin.ruler==='object')? (coin.ruler.label||'') : coin.ruler||'';
+        const valuesMatch = (field, userVal, authVal) => {
+            const a = norm(userVal);
+            const b = norm(authVal);
+            if (a && a === b) return true;
+            if (field === 'Material') {
+                const strip = (txt) => String(txt || '')
+                    .replace(/\([^)]*\)/g, '')
+                    .replace(/\b(ae|ar|av|el|bi|cu)\b/gi, '')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .toLowerCase();
+                const strippedUser = strip(userVal);
+                const strippedAuth = strip(authVal);
+                if (strippedUser && strippedAuth && strippedUser === strippedAuth) return true;
+                const uriUser = this._mapMaterialToNomisma(userVal);
+                const uriAuth = this._mapMaterialToNomisma(authVal);
+                if (uriUser && uriAuth && uriUser === uriAuth) return true;
+            }
+            return false;
+        };
+        const userAuthority = (coin.ruler && typeof coin.ruler==='object')? (coin.ruler.label||'') : coin.ruler||'';
         const authAuthority = snap?.nomisma_ruler?.label || snap?.authority_info?.label || '';
-        if (userAuthority && authAuthority && norm(userAuthority) !== norm(authAuthority)) conflicts.push({ field:'Authority', user:userAuthority, authoritative:authAuthority });
-        const userMint = (typeof coin.origin==='object')? (coin.origin.label||'') : coin.origin||'';
+        if (userAuthority && authAuthority && !valuesMatch('Authority', userAuthority, authAuthority)) conflicts.push({ field:'Authority', user:userAuthority, authoritative:authAuthority });
+        const userMint = (coin.origin && typeof coin.origin==='object')? (coin.origin.label||'') : coin.origin||'';
         const authMint = snap?.nomisma_origin?.label || snap?.mint_info?.label || '';
-        if (userMint && authMint && norm(userMint) !== norm(authMint)) conflicts.push({ field:'Mint', user:userMint, authoritative:authMint });
+        if (userMint && authMint && !valuesMatch('Mint', userMint, authMint)) conflicts.push({ field:'Mint', user:userMint, authoritative:authMint });
         const userMaterial = (typeof coin.material==='object')? (coin.material.label||'') : coin.material||'';
         const authMaterial = snap?.nomisma_material?.label || snap?.material_info?.label || '';
-        if (userMaterial && authMaterial && norm(userMaterial) !== norm(authMaterial)) conflicts.push({ field:'Material', user:userMaterial, authoritative:authMaterial });
-        const userPeriod = (typeof coin.period==='object')? (coin.period.label||'') : '';
+        if (userMaterial && authMaterial && !valuesMatch('Material', userMaterial, authMaterial)) conflicts.push({ field:'Material', user:userMaterial, authoritative:authMaterial });
+        const userPeriod = (coin.period && typeof coin.period==='object')? (coin.period.label||'') : '';
         const authPeriod = snap?.nomisma_period?.label || snap?.period_info?.label || '';
-        if (userPeriod && authPeriod && norm(userPeriod) !== norm(authPeriod)) conflicts.push({ field:'Period', user:userPeriod, authoritative:authPeriod });
+        if (userPeriod && authPeriod && !valuesMatch('Period', userPeriod, authPeriod)) conflicts.push({ field:'Period', user:userPeriod, authoritative:authPeriod });
         const conflictHtml = conflicts.length ? `<div class=\"card collapsible conflict-card\"><h3 class=\"collapsible-head\"><span class=\"caret\"></span>Potential Conflicts <span class=\"badge-warning\">${conflicts.length}</span></h3><div class=\"collapse-body\"><p class=\"conflict-intro\">Differences between your entries and authoritative sources:</p><ul class=\"conflict-list\">${conflicts.map(c=> `<li><strong>${this.escapeHtml(c.field)}:</strong> You: <em>${this.escapeHtml(c.user)}</em> · Source: <em>${this.escapeHtml(c.authoritative)}</em></li>`).join('')}</ul><p class=\"conflict-note\">Review and decide which value is correct. (Early prototype)</p></div></div>` : '';
 
         // Redesigned layout (header, view tools, hero area, context columns) inserted below.
@@ -3011,11 +3551,10 @@ LIMIT 200`;
         const subtitleLine = subtitleParts.join(' · ');
         const headerHtml = `
             <div class="modal-header">
-              <div style="flex:1;min-width:280px;">
-                <h2>${this.escapeHtml(coin.name)}</h2>
-                ${subtitleLine? `<div class="subtitle-line">${this.escapeHtml(subtitleLine)}</div>`:''}
-                <div class="helper-line">This page combines your notes with data from OCRE, Nomisma and Wikidata.</div>
-              </div>
+                            <div style="flex:1;min-width:280px;">
+                                <h2>${this.escapeHtml(coin.name)}</h2>
+                                ${subtitleLine? `<div class="subtitle-line">${this.escapeHtml(subtitleLine)}</div>`:''}
+                            </div>
                             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                                 <div class="more-menu">
                   <button id="moreMenuBtn" class="btn-secondary" style="padding:0.4rem 0.8rem;">More ▾</button>
@@ -3027,9 +3566,8 @@ LIMIT 200`;
                   </div>
                 </div>
               </div>
-            </div>
-            <div class="modal-subdivider"></div>`;
-        const viewTools = (coin.images.length>0)? `<div class="modal-media-tools">
+            </div>`;
+        const viewTools = this._hasCoinImageSource(coin) ? `<div class="modal-media-tools">
             <div class="tool-group tool-views" role="group" aria-label="View">
                 <div class="tool-title">View</div>
                 <div class="tool-row">
@@ -3060,8 +3598,7 @@ LIMIT 200`;
                 </div>
             </div>
         </div>` : '';
-        // Wrap Image Tools in a collapsible card like other sections
-        const viewToolsCard = viewTools ? `<div class="card collapsible collapsed image-tools-card" id="imageToolsCard"><h3 class="collapsible-head"><span class="caret"></span>Image Tools</h3><div class="collapse-body">${viewTools}</div></div>` : '';
+        const viewToolsCard = viewTools ? `<div class="card image-tools-card collapsible collapsed" id="imageToolsCard"><h3 class="collapsible-head"><span class="caret"></span>Image Tools</h3><div class="collapse-body">${viewTools}</div></div>` : '';
         const obvCaption = this.escapeHtml(coin.obverse||'');
         const revCaption = this.escapeHtml(coin.reverse||'');
         const heroFaces = [];
@@ -3070,20 +3607,23 @@ LIMIT 200`;
         if (heroObv) heroFaces.push({ url: heroObv, label: 'OBVERSE', caption: obvCaption, role: 'obv' });
         if (heroRev && heroRev !== heroObv) heroFaces.push({ url: heroRev, label: 'REVERSE', caption: revCaption, role: 'rev' });
         if (heroFaces.length < 2) {
-            const extras = Array.isArray(coin.images)? coin.images.filter(img => img && img !== heroObv && img !== heroRev) : [];
+            const extras = this._collectCoinImageSources(coin).filter(src => src && src !== heroObv && src !== heroRev);
             if (extras.length) heroFaces.push({ url: extras[0], label: heroFaces.length ? 'DETAIL' : 'REVERSE', caption: revCaption || obvCaption, role: 'extra' });
         }
         const heroImagesHtml = heroFaces.length? `<div class="hero-images">${heroFaces.map(face => {
             const altFace = face.role==='obv' ? 'obverse' : (face.role==='rev' ? 'reverse' : 'detail');
             return `<div class=\"face-card\"><div class=\"face-media\"><img class=\"img-main\" src=\"${face.url}\" alt=\"${this.escapeHtml(coin.name)} ${altFace}\"></div><div class=\"face-caption-label\" title=\"From your input\">${face.label} – From you</div>${face.caption? `<div class=\"face-caption-text\">${face.caption}</div>`:''}</div>`;
         }).join('')}</div>`:'';
+        const heroVisualBlock = viewToolsCard && heroImagesHtml
+            ? `<div class="hero-images-stack">${viewToolsCard}${heroImagesHtml}</div>`
+            : heroImagesHtml;
         // Essentials rows captured semantically (dt/dd directly inside one <dl>)
         const capFirst = (s)=>{ const t=String(s||''); return t ? t.charAt(0).toUpperCase()+t.slice(1) : t; };
         const essentialsRows=[]; const pushEss=(lbl,val,sources=[])=>{ if(!val) return; const order=['user','nomisma','ocre','wikidata','wikipedia']; const uniq=[]; sources.forEach(s=>{ if(order.includes(s) && !uniq.includes(s)) uniq.push(s); }); const textMap={ user:'You', nomisma:'Nomisma', ocre:'OCRE', wikidata:'Wikidata', wikipedia:'Wikipedia' }; const chipTitle = uniq.length? `Sources: ${uniq.map(s=> textMap[s]||s).join(', ')}`:'Source: You'; essentialsRows.push(`<dt>${this.escapeHtml(lbl)}</dt><dd title=\"${this.escapeHtml(chipTitle)}\"><span class=\"value-text\">${this.escapeHtml(val)}</span></dd>`); };
-        const authorityVal = resolvedRulerLabel || (typeof coin.ruler==='object'? (coin.ruler.label||'') : coin.ruler||''); const authoritySources=[]; if(coin.ruler) authoritySources.push('user'); if(snap?.nomisma_ruler) authoritySources.push('nomisma'); if(snap?.authority_info) authoritySources.push('wikidata');
+        const authorityVal = resolvedRulerLabel || (coin.ruler && typeof coin.ruler==='object'? (coin.ruler.label||'') : coin.ruler||''); const authoritySources=[]; if(coin.ruler) authoritySources.push('user'); if(snap?.nomisma_ruler) authoritySources.push('nomisma'); if(snap?.authority_info) authoritySources.push('wikidata');
         const denomVal = this._denominationFromName(coin.name||''); const denomSources = denomVal? ['user']:[];
-        const periodVal = capFirst((typeof coin.period==='object')? (coin.period.label||'') : ''); const periodSources=[]; if(periodVal) periodSources.push('user'); if(snap?.nomisma_period) periodSources.push('nomisma'); if(snap?.period_info) periodSources.push('wikidata');
-        const mintValRaw = (typeof coin.origin==='object')? (coin.origin.label||'') : (coin.origin||'');
+        const periodVal = capFirst((coin.period && typeof coin.period==='object')? (coin.period.label||'') : ''); const periodSources=[]; if(periodVal) periodSources.push('user'); if(snap?.nomisma_period) periodSources.push('nomisma'); if(snap?.period_info) periodSources.push('wikidata');
+        const mintValRaw = (coin.origin && typeof coin.origin==='object')? (coin.origin.label||'') : (coin.origin||'');
         const mintVal = capFirst(mintValRaw);
         const mintSources=[]; if(mintValRaw) mintSources.push('user'); if(snap?.nomisma_origin) mintSources.push('nomisma'); if(snap?.mint_info) mintSources.push('wikidata');
         const materialVal = capFirst(matLabel || ''); const materialSources=[]; if(materialVal) materialSources.push('user'); if(snap?.nomisma_material) materialSources.push('nomisma'); if(snap?.material_info) materialSources.push('wikidata');
@@ -3092,10 +3632,10 @@ LIMIT 200`;
         pushEss('Date',dateVal,dateSources); pushEss('Period',periodVal,periodSources); pushEss('Authority',authorityVal,authoritySources); pushEss('Denomination',denomVal,denomSources); pushEss('Mint',mintVal,mintSources); pushEss('Material',materialVal,materialSources); pushEss('Weight',wVal,wVal?['user']:[]); pushEss('Diameter',dVal,dVal?['user']:[]);
         const essentialsHtml = `<div class=\"card essentials-card\"><h3>Essentials</h3><dl class=\"dl essentials-dl\">${essentialsRows.join('')}</dl><div class=\"essentials-helper\">Key facts used for search, filtering and labels.</div></div>`;
         const legendHtml = `<div class=\"legend-sources\">\n            <span class=\"legend-item\"><span class=\"source-chip user\" title=\"Your direct input\">You</span><span class=\"legend-desc\">Values you entered</span></span>\n            <span class=\"legend-item\"><span class=\"source-chip nomisma\" title=\"Authoritative numismatic concept from Nomisma.org\">Nomisma</span><span class=\"legend-desc\">Controlled numismatic concept</span></span>\n            <span class=\"legend-item\"><span class=\"source-chip ocre\" title=\"Canonical Roman Imperial type reference (OCRE)\">OCRE</span><span class=\"legend-desc\">Canonical type reference</span></span>\n            <span class=\"legend-item\"><span class=\"source-chip wikidata\" title=\"Structured entity from Wikidata\">Wikidata</span><span class=\"legend-desc\">Structured entity facts</span></span>\n            <span class=\"legend-item\"><span class=\"source-chip wikipedia\" title=\"Public encyclopedic summary\">Wikipedia</span><span class=\"legend-desc\">Summary & image</span></span>\n        </div>`;
-        const heroHtml = `<div class=\"hero-grid\">${heroImagesHtml}</div><div class=\"essentials-row\">${essentialsHtml}</div>`;
+        const heroHtml = `<div class=\"hero-grid\">${heroVisualBlock}</div><div class=\"essentials-row\">${essentialsHtml}</div>`;
         // Direct single-column context markup (no post-render merge) with standardized button classes
-        modalBody.innerHTML = `${headerHtml}${viewToolsCard}${heroHtml}
-            <div class=\"context-single\">\n                ${coin.description ? `<div class=\"card collapsible\"><h3 class=\"collapsible-head\"><span class=\"caret\"></span>Description & Notes <span class=\"source-chip user\" title=\"Source: You\">You</span></h3><div class=\"collapse-body\"><p class=\"desc-clamp\" id=\"descText\" title=\"Source: You\">${this.escapeHtml(coin.description)}</p><button id=\"descToggle\" class=\"show-more btn-sm btn-secondary\" aria-expanded=\"false\" hidden>Show more</button></div></div>` : ''}\n                <div class=\"card collapsible\"><h3 class=\"collapsible-head\"><span class=\"caret\"></span>Physical Details <span class=\"source-chip user\" title=\"Source: You\">You</span></h3><div class=\"collapse-body\"><div class=\"physical-dl\">${wVal? `<div class=\\"dl\\"><dt>Weight</dt><dd title=\\"Source: You\\">${this.escapeHtml(wVal)}</dd></div>`:''}${dVal? `<div class=\\"dl\\"><dt>Diameter</dt><dd title=\\"Source: You\\">${this.escapeHtml(dVal)}</dd></div>`:''}${coin.obverse? `<div class=\\"dl\\"><dt>Obverse</dt><dd title=\\"Source: You\\">${this.escapeHtml(coin.obverse)}</dd></div>`:''}${coin.reverse? `<div class=\\"dl\\"><dt>Reverse</dt><dd title=\\"Source: You\\">${this.escapeHtml(coin.reverse)}</dd></div>`:''}</div><div class=\"physical-details-note\">Condition, strike, toning, orientation—add in free text above.</div></div></div>\n                ${refsHtml}\n                <div id=\"typeCardHost\"></div>\n                <div id=\"learnMoreCards\"></div>\n                ${legendHtml}\n                ${conflictHtml}\n            </div>`;
+        modalBody.innerHTML = `${headerHtml}${heroHtml}
+            <div class=\"context-single\">\n                ${coin.description ? `<div class=\"card collapsible\"><h3 class=\"collapsible-head\"><span class=\"caret\"></span>Description & Notes <span class=\"source-chip user\" title=\"Source: You\">You</span></h3><div class=\"collapse-body\"><p class=\"desc-clamp\" id=\"descText\" title=\"Source: You\">${this.escapeHtml(coin.description)}</p><button id=\"descToggle\" class=\"show-more btn-sm btn-secondary\" aria-expanded=\"false\" hidden>Show more</button></div></div>` : ''}\n                <div id=\"typeCardHost\"></div>\n                <div id=\"learnMoreCards\"></div>\n                ${legendHtml}\n                ${conflictHtml}\n                ${refsHtml}\n            </div>`;
 
         // Initialize clickable collapsible headers (toggle .collapsed)
         modalBody.querySelectorAll('.collapsible-head').forEach(head => {
@@ -3220,7 +3760,8 @@ LIMIT 200`;
 
         const modalImgs = document.querySelectorAll('.hero-images .img-main, .modal-media .img-main, .modal-thumbs img');
         if (modalImgs && modalImgs.length > 0) {
-            const urls = coin.images.slice();
+            const urls = this._collectCoinImageSources(coin);
+            if (!urls.length && this.PLACEHOLDER_IMAGE) urls.push(this.PLACEHOLDER_IMAGE);
             modalImgs.forEach((imgEl, idx) => {
                 imgEl.style.cursor = 'zoom-in';
                 imgEl.addEventListener('click', () => {
@@ -3385,6 +3926,17 @@ LIMIT 200`;
                         return '';
                     })();
                     const learnBtn = isPeriod ? `<div style=\"margin-top:6px\"><button type=\"button\" id=\"learnPeriodBtn\" class=\"btn-link\">Learn more about this period</button></div>` : '';
+                    const mintCoords = opts.mint ? this._resolveMintCoordinates(info, nmFallback) : null;
+                    const mapHtml = (opts.mint && mintCoords) ? this._renderMintMap(mintCoords, label) : '';
+                    if (opts.mint) {
+                        try {
+                            if (mintCoords) {
+                                console.debug('Mint map ready', { label, lat: mintCoords.lat, lon: mintCoords.lon, source: info?.coordinates ? 'snapshot' : (nmFallback?.coordinates ? 'nomisma' : 'synthetic') });
+                            } else {
+                                console.debug('Mint map missing coordinates', { label, hasSnapshot: !!info?.coordinates, hasNomisma: !!nmFallback?.coordinates });
+                            }
+                        } catch (_) {}
+                    }
                     const secSources = [];
                     if (info?.qid || info?.label) secSources.push('wikidata');
                     if (info?.wikipedia?.extract) secSources.push('wikipedia');
@@ -3397,13 +3949,13 @@ LIMIT 200`;
                         return chip(src);
                     }).join(' ');
                     return `
-                        <div class=\"card collapsible\">\n                            <h3 class=\"collapsible-head\"><span class=\"caret\"></span>${this.escapeHtml(title)} ${chips}</h3>\n                            <div class=\"collapse-body\">\n                                <div class=\"ruler-card\">\n                                    ${thumb ? `<img class=\"ruler-avatar\" src=\"${this.escapeHtml(thumb)}\" alt=\"\" aria-hidden=\"true\">` : ''}\n                                    <div>\n                                        <div class=\"ruler-name-row\"><div class=\"ruler-name\" title=\"${labelSrc?`Label from ${this.escapeHtml(labelSrc)}`:''}\">${this.escapeHtml(label)}</div> ${years ? `<span class=\"years\">${years}</span>` : ''}</div>\n                                        ${desc ? `<div class=\"ruler-desc\" title=\"${descSrc?`Summary from ${this.escapeHtml(descSrc)}`:''}\">${this.escapeHtml(desc)}</div>` : `<div class=\"ruler-desc\" style=\"color:#6b7280\">No additional summary available.</div>`}\n                                        ${learnBtn}\n                                    </div>\n                                </div>\n                            </div>\n                        </div>`;
+                        <div class=\"card collapsible\">\n                            <h3 class=\"collapsible-head\"><span class=\"caret\"></span>${this.escapeHtml(title)} ${chips}</h3>\n                            <div class=\"collapse-body\">\n                                <div class=\"ruler-card\">\n                                    ${thumb ? `<img class=\"ruler-avatar\" src=\"${this.escapeHtml(thumb)}\" alt=\"\" aria-hidden=\"true\">` : ''}\n                                    <div>\n                                        <div class=\"ruler-name-row\"><div class=\"ruler-name\" title=\"${labelSrc?`Label from ${this.escapeHtml(labelSrc)}`:''}\">${this.escapeHtml(label)}</div> ${years ? `<span class=\"years\">${years}</span>` : ''}</div>\n                                        ${desc ? `<div class=\"ruler-desc\" title=\"${descSrc?`Summary from ${this.escapeHtml(descSrc)}`:''}\">${this.escapeHtml(desc)}</div>` : `<div class=\"ruler-desc\" style=\"color:#6b7280\">No additional summary available.</div>`}\n                                        ${learnBtn}\n                                    </div>\n                                </div>\n                                ${mapHtml}\n                            </div>\n                        </div>`;
                 };
                 const parts = [];
                 if (ainfo || nmRuler) parts.push(renderCard('About the ruler', ainfo, nmRuler));
                 if (pinfo || nmPeriod) parts.push(renderCard('About the period', pinfo, nmPeriod, { period: true }));
-                if (minfo || nmMint) parts.push(renderCard('About the mint', minfo, nmMint));
                 if (matInfo || nmMaterial) parts.push(renderCard('About the material', matInfo, nmMaterial));
+                if (minfo || nmMint) parts.push(renderCard('About the mint', minfo, nmMint, { mint: true }));
                 lmHost.innerHTML = parts.join('');
                 // Wire period learn button
                 const lp = document.getElementById('learnPeriodBtn');
@@ -3420,6 +3972,24 @@ LIMIT 200`;
         } catch (_) {}
     }
 
+    openMuseumFromOverview(){
+        if (!Array.isArray(this.coins) || this.coins.length === 0){
+            alert('Add at least one coin to enter Museum Mode.');
+            return;
+        }
+        const visibleCoins = this.coins.filter(coin => this._coinMatchesSearch(coin));
+        if (!visibleCoins.length){
+            alert('No coins match the current search. Clear the search to open Museum Mode.');
+            return;
+        }
+        let startId = null;
+        if (this.selectedForPrint && this.selectedForPrint.size){
+            const preferred = visibleCoins.find(c => this.selectedForPrint.has(c.id));
+            if (preferred) startId = preferred.id;
+        }
+        this.openMuseumMode(startId || visibleCoins[0].id);
+    }
+
     // Museum Mode
     openMuseumMode(coinId){
         const overlay = document.getElementById('museumOverlay');
@@ -3428,8 +3998,13 @@ LIMIT 200`;
         const plaque = document.getElementById('museumPlaque');
         const toolbar = document.getElementById('museumToolbar');
         if (!overlay || !stage || !imgs || imgs.length<2 || !plaque || !toolbar) return;
-        const startIdx = this.coins.findIndex(c=> c.id===coinId);
-        if (startIdx<0) return;
+        let startIdx = typeof coinId !== 'undefined' ? this.coins.findIndex(c=> c.id===coinId) : -1;
+        if (startIdx < 0) startIdx = this.coins.length ? 0 : -1;
+        if (startIdx < 0){
+            alert('Add at least one coin to enter Museum Mode.');
+            return;
+        }
+        const startCoinId = this.coins[startIdx]?.id;
         this._museum = {
             order:'random', list:[], index:0,
             face:'obv', currentFace:'obv', bg:'white', playing:false, speed:10000,
@@ -3437,7 +4012,8 @@ LIMIT 200`;
             _overlayEl:null, _onPointerShow:null, _onKeyDown:null, _onClickAdvance:null
         };
         this._museum.list = this._getMuseumList(this._museum.order);
-        this._museum.index = Math.max(0, this._museum.list.findIndex(c=> c.id===coinId));
+        const seededIndex = startCoinId ? this._museum.list.findIndex(c=> c.id===startCoinId) : -1;
+        this._museum.index = Math.max(0, seededIndex);
         overlay.classList.remove('hidden');
         // Default panel background white
         const panel = stage.querySelector('.museum-panel');
@@ -3539,9 +4115,11 @@ LIMIT 200`;
         const plaque = document.getElementById('museumPlaque'); if (!plaque) return;
         const coin = st.list[index]; if (!coin) return;
         st.index = index;
-        const obv = coin.images[0] || this.PLACEHOLDER_IMAGE;
-        const rev = coin.images[1] || obv;
-        const src = (st.currentFace==='rev') ? rev : obv;
+        const faces = this._resolveCoinFaces(coin);
+        const obv = faces.obv;
+        const rev = faces.rev;
+        const showingReverse = st.currentFace==='rev';
+        const src = showingReverse ? rev : obv;
         // Crossfade
         const [imgA, imgB] = imgs;
         const currentVisible = imgA.classList.contains('visible') ? imgA : imgB;
@@ -3551,43 +4129,53 @@ LIMIT 200`;
             nextImg.classList.add('visible');
             currentVisible.classList.remove('visible');
         }
+        const faceLabelNode = overlay.querySelector('[data-museum-face-label]');
+        const faceTextNode = overlay.querySelector('[data-museum-face-text]');
+        if (faceLabelNode) faceLabelNode.textContent = showingReverse ? 'Reverse' : 'Obverse';
+        if (faceTextNode){
+            const faceDescRaw = showingReverse ? coin.reverse : coin.obverse;
+            const faceDesc = faceDescRaw ? this._typographyRefine(this._smartQuotes(faceDescRaw, true)) : '';
+            faceTextNode.textContent = faceDesc || 'Tap to advance';
+        }
         // Premium plaque content
-        const mint = (typeof coin.origin==='object')? (coin.origin.label||'') : (coin.origin||'');
+        const mintRaw = (coin.origin && typeof coin.origin==='object')? (coin.origin.label||'') : (coin.origin||'');
+        const mint = mintRaw ? this._smartQuotes(mintRaw,false) : '';
         const dateTextRaw = this._formatDateRange(coin.struck_date?.exact) || '';
         const dateText = this._typographyRefine(dateTextRaw);
         const material = this._materialLabel(coin.material);
         const denom = this._denominationFromName(coin.name||'');
         const materialWithCode = (()=>{
             if (!material) return '';
-            const code = (coin.material && coin.material.code) ? coin.material.code : '';
+            const codeRaw = (coin.material && coin.material.code) ? String(coin.material.code).trim() : '';
+            const code = codeRaw ? codeRaw.toUpperCase() : '';
             return code ? `${material} (${code})` : material;
         })();
-        const ruler = (typeof coin.ruler==='object')? (coin.ruler.label||'') : (coin.ruler||'');
+        const rulerRaw = (coin.ruler && typeof coin.ruler==='object')? (coin.ruler.label||'') : (coin.ruler||'');
+        const ruler = rulerRaw ? this._smartQuotes(rulerRaw,false) : '';
         // Info lines order: denomination, ruler, metal
         const infoArr = [denom, ruler, materialWithCode].filter(Boolean);
         const descFull = (coin.description && coin.description.trim().length>10) ? coin.description.trim() : '';
         const descTrunc = descFull && descFull.length>480 ? descFull.slice(0,477)+'…' : descFull;
         const descSmart = descTrunc ? this._typographyRefine(this._smartQuotes(descTrunc, true)) : '';
-        const notes = this._museumCatalogLines(coin);
         const metaPieces = [dateText, mint].filter(Boolean);
         const metaLine = metaPieces.length? metaPieces.join(' \u00A0•\u00A0 ') : '';
         const titleSmart = this._smartQuotes(coin.name||'', false);
         plaque.innerHTML = `
-            <div class="m-collection-label">THE COLLECTION</div>
-            <div class="m-line m-name">${this.escapeHtml(titleSmart||'')}</div>
-            <div class="m-rule"></div>
+            <div class="m-heading">
+                <div class="m-collection-label">THE COLLECTION</div>
+                <div class="m-line m-name">${this.escapeHtml(titleSmart||'')}</div>
+                <div class="m-rule"></div>
+            </div>
             ${metaLine? `<div class="m-line m-meta">${this.escapeHtml(metaLine)}</div>`:''}
             ${infoArr.length? `<div class="m-info-group">${infoArr.map(x=> `<div class="m-info-line">${this.escapeHtml(this._smartQuotes(x,false))}</div>`).join('')}</div>`:''}
             ${descSmart? `<div class="m-desc"><p>${this.escapeHtml(descSmart)}</p></div>`:''}
-            ${notes.obv || notes.rev ? `<div class="m-notes">${notes.obv? `<div class="m-note-line">OBV: ${this.escapeHtml(this._typographyRefine(notes.obv))}</div>`:''}${notes.rev? `<div class="m-note-line">REV: ${this.escapeHtml(this._typographyRefine(notes.rev))}</div>`:''}</div>`:''}
         `;
     }
 
     _museumHasTwoFaces(coin){
         if (!coin) return false;
-        const obv = coin.images?.[0] || '';
-        const rev = coin.images?.[1] || '';
-        return !!(rev && rev !== obv);
+        const faces = this._resolveCoinFaces(coin);
+        return !!(faces.rev && faces.rev !== faces.obv);
     }
 
     _museumStep(dir){
@@ -3646,10 +4234,15 @@ LIMIT 200`;
 
     _materialLabel(codeOrText){
         if (!codeOrText) return '';
-        const s = String(codeOrText).trim();
+        if (typeof codeOrText === 'object'){
+            if (codeOrText.label) return String(codeOrText.label).trim();
+            if (codeOrText.code) return this._materialLabel(codeOrText.code);
+        }
+        const raw = String(codeOrText).trim();
+        const key = raw.toUpperCase();
         const map = { AR:'Silver', AV:'Gold', AE:'Bronze', EL:'Electrum', BI:'Billon', CU:'Copper' };
-        if (map[s]) return map[s];
-        return s.length<=4 ? s : s; // pass-through for custom
+        if (map[key]) return map[key];
+        return raw;
     }
 
     _denominationFromName(name){
@@ -3659,20 +4252,9 @@ LIMIT 200`;
         for (const t of toks){
             const re = new RegExp(`(?:^|[^a-z])(${t})(?:[^a-z]|$)`,`i`);
             const m = lower.match(re);
-            if (m) return t;
+            if (m) return t.charAt(0).toUpperCase()+t.slice(1);
         }
         return '';
-    }
-
-    _museumCatalogLines(coin){
-        if (!coin) return { obv:'', rev:'' };
-        const clean = (s)=> (s||'').trim();
-        const obv = clean(coin.obverse);
-        const rev = clean(coin.reverse);
-        return {
-            obv: obv.length>260 ? obv.slice(0,257)+'…' : obv,
-            rev: rev.length>260 ? rev.slice(0,257)+'…' : rev
-        };
     }
 
     _smartQuotes(str, wrapIfQuoted=false){
@@ -3964,9 +4546,9 @@ LIMIT 200`;
         const coinB = st.bId? this.coins.find(c=> c.id===st.bId) : null;
         const pickFace = (coin)=>{
             if (!coin) return [];
-            if (st.mode==='obv') return [coin.images[0] || this.PLACEHOLDER_IMAGE];
-            if (st.mode==='rev') return [coin.images[1] || coin.images[0] || this.PLACEHOLDER_IMAGE];
-            return [coin.images[0] || this.PLACEHOLDER_IMAGE];
+            const faces = this._resolveCoinFaces(coin);
+            if (st.mode==='rev') return [faces.rev];
+            return [faces.obv];
         };
         if (wrapA){ wrapA.style.cursor='zoom-in'; wrapA.onclick = ()=>{ const imgs = pickFace(coinA); if (imgs.length) this.openImageLightbox(imgs,0); }; }
         if (wrapB && coinB){ wrapB.style.cursor='zoom-in'; wrapB.onclick = ()=>{ const imgs = pickFace(coinB); if (imgs.length) this.openImageLightbox(imgs,0); }; }
@@ -3988,14 +4570,14 @@ LIMIT 200`;
         if (!coinA){
             wrapA.innerHTML = `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:0.9rem;">Select coin A to compare</div>`;
         } else {
-            const obvA = coinA.images[0] || this.PLACEHOLDER_IMAGE; const revA = coinA.images[1] || obvA;
-            wrapA.innerHTML = buildImgs(obvA, revA, 'A');
+            const facesA = this._resolveCoinFaces(coinA);
+            wrapA.innerHTML = buildImgs(facesA.obv, facesA.rev, 'A');
         }
         if (!coinB){
             wrapB.innerHTML = `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:0.9rem;">Select coin B to compare</div>`;
         } else {
-            const obvB = coinB.images[0] || this.PLACEHOLDER_IMAGE; const revB = coinB.images[1] || obvB;
-            wrapB.innerHTML = buildImgs(obvB, revB, 'B');
+            const facesB = this._resolveCoinFaces(coinB);
+            wrapB.innerHTML = buildImgs(facesB.obv, facesB.rev, 'B');
         }
         this._applyCompareTransforms();
     }
@@ -4648,7 +5230,7 @@ LIMIT 200`;
         };
         if (snap.authority_info) cards.push(mkCard(snap.authority_info.label || (coin.ruler?.label || coin.ruler) || 'Authority', snap.authority_info));
         if (snap.mint_info) cards.push(mkCard(snap.mint_info.label || (coin.origin?.label || coin.origin) || 'Mint', snap.mint_info));
-    if (snap.period_info) cards.push(mkCard(snap.period_info.label || ((typeof coin.period==='object')? (coin.period.label||'') : (coin.period||'')) || 'Period', snap.period_info));
+    if (snap.period_info) cards.push(mkCard(snap.period_info.label || ((coin.period && typeof coin.period==='object')? (coin.period.label||'') : (coin.period||'')) || 'Period', snap.period_info));
     // Replace legacy date usage with period label
     if (snap.period_info) { /* updated above; clean duplication handled */ }
         // Nomisma summaries for selected concepts
@@ -4743,7 +5325,7 @@ LIMIT 200`;
         // Fetch and render rulers sequence as chips; highlight coin's ruler
         const coinRulerQid = (()=>{
             const snap = coin.facts_snapshot || {};
-            return snap?.authority_info?.qid || (typeof coin.ruler==='object' ? (coin.ruler.wikidata_qid||null) : null) || null;
+            return snap?.authority_info?.qid || (coin.ruler && typeof coin.ruler==='object' ? (coin.ruler.wikidata_qid||null) : null) || null;
         })();
         let rulers = [];
         if (qid) {
@@ -4766,7 +5348,7 @@ LIMIT 200`;
                 });
             });
         } else {
-            const fallbackLabel = (()=>{ const snap=coin.facts_snapshot||{}; return snap?.authority_info?.label || snap?.nomisma_ruler?.label || (typeof coin.ruler==='object'? (coin.ruler.label||'') : (coin.ruler||'')); })();
+            const fallbackLabel = (()=>{ const snap=coin.facts_snapshot||{}; return snap?.authority_info?.label || snap?.nomisma_ruler?.label || (coin.ruler && typeof coin.ruler==='object'? (coin.ruler.label||'') : (coin.ruler||'')); })();
             rulersHost.innerHTML = fallbackLabel ? `<span class="ruler-chip active">${this.escapeHtml(fallbackLabel)}</span>` : '<em>No rulers found for this period.</em>';
         }
 
@@ -4822,7 +5404,7 @@ LIMIT 200`;
         if (qid) {
             const originQid = (()=>{
                 const snap=coin.facts_snapshot||{};
-                return snap?.nomisma_origin?.wikidata || (typeof coin.origin==='object'? (coin.origin.wikidata_qid||null) : null) || null;
+                return snap?.nomisma_origin?.wikidata || (coin.origin && typeof coin.origin==='object'? (coin.origin.wikidata_qid||null) : null) || null;
             })();
             const t0 = (window.performance?.now?.()||Date.now());
             try { events = await this._fetchPeriodEvents(qid, { rulers, periodRange, originQid, struckExact: coin.struck_date?.exact || null }, trace); } catch(e){ console.error('history: _fetchPeriodEvents error', e); }
@@ -4946,13 +5528,19 @@ LIMIT 200`;
                 if (h.wd) a.push(`<a href="${this.escapeHtml(h.wd)}" target="_blank" rel="noopener">Wikidata</a>`);
                 return a.length ? `<div class="card-links">${a.join(' · ')}</div>` : '';
             })();
-            return `<div class="entity-card">${img}<div class="inner"><div class="title">${this.escapeHtml(it.label||it.qid)}</div>${sub}</div>${links}</div>`;
+            return `<div class="entity-card">`+
+                   `${img}`+
+                   `<div class="inner">`+
+                   `<div class="title">${this.escapeHtml(it.label || it.qid || '')}</div>`+
+                   `${sub}`+
+                   `</div>`+
+                   `${links}`+
+                   `</div>`;
         };
 
-        // Append card grid sections
         sections.forEach(sec => {
-            if (!sec.items || !sec.items.length) return;
-            const grid = sec.items.map(renderCard).join('');
+            const grid = (sec.items || []).map(renderCard).join('');
+            if (!grid) return;
             blocks.push(`<div class="ov-section"><h4>${this.escapeHtml(sec.title)}</h4><div class="entity-grid">${grid}</div></div>`);
         });
 
@@ -5060,7 +5648,7 @@ LIMIT 200`;
         }).slice(0,20);
 
         const coinsHtml = coins.length ? coins.map(c => {
-            const img = (c.images && c.images[0]) ? c.images[0] : this.PLACEHOLDER_IMAGE;
+            const img = this._getCoinFace(c, 'obv') || this.PLACEHOLDER_IMAGE;
             return `<div class="coins-mini-card"><img src="${img}" alt="thumb"/><div>${this.escapeHtml(c.name||'Untitled')}</div></div>`;
         }).join('') : '<em>No coins in your collection linked to this ruler yet.</em>';
 
@@ -5135,6 +5723,33 @@ LIMIT 200`;
     _eraNum(p){
         if (!p || !p.year) return null;
         return (p.era === 'BCE') ? -Math.abs(parseInt(p.year,10)) : Math.abs(parseInt(p.year,10));
+    }
+
+    _yearFromFreeform(input){
+        if (input == null) return null;
+        const text = String(input).trim();
+        if (!text) return null;
+        const match = text.match(/(-?\d{1,4})/);
+        if (!match) return null;
+        const num = parseInt(match[1], 10);
+        if (!Number.isFinite(num)) return null;
+        if (/BCE/i.test(text) && num > 0) return -Math.abs(num);
+        return num;
+    }
+
+    _getStruckDateSortValue(coin){
+        if (!coin) return Number.POSITIVE_INFINITY;
+        const exact = coin.struck_date?.exact;
+        const fromVal = this._eraNum(exact?.from);
+        if (fromVal != null) return fromVal;
+        const toVal = this._eraNum(exact?.to);
+        if (toVal != null) return toVal;
+        const fallbackSources = [coin.struck_date?.note, coin.period_year, coin.date];
+        for (const source of fallbackSources){
+            const val = this._yearFromFreeform(source);
+            if (val != null) return val;
+        }
+        return Number.POSITIVE_INFINITY;
     }
 
     _yearFromWikidataTime(t){
@@ -5610,68 +6225,15 @@ ORDER BY ?start`;
 
     // Filter coins by search term
     filterCoins(searchTerm) {
-        const filtered = this.coins.filter(coin => {
-            const term = String(searchTerm || '').toLowerCase();
-            const dateText = (()=>{ const range=this._formatDateRange(coin.struck_date?.exact); const note=coin.struck_date?.note||''; const periodLabel=(typeof coin.period==='object'? coin.period.label : (coin.period||'')); return [periodLabel, range, note].filter(Boolean).join(' '); })();
-            const originText = (coin.origin && typeof coin.origin === 'object') ? (coin.origin.label || '') : (coin.origin || '');
-            const rulerText = (coin.ruler && typeof coin.ruler === 'object') ? (coin.ruler.label || '') : (coin.ruler || '');
-            return (coin.name || '').toLowerCase().includes(term) ||
-                   String(dateText).toLowerCase().includes(term) ||
-                   String(originText).toLowerCase().includes(term) ||
-                   String(rulerText).toLowerCase().includes(term) ||
-                   (coin.description && coin.description.toLowerCase().includes(term));
-        });
-
-        const grid = document.getElementById('coinsGrid');
-        const emptyState = document.getElementById('emptyState');
-
-        if (filtered.length === 0) {
-            grid.innerHTML = '';
-            emptyState.innerHTML = '<p>No coins found matching your search.</p>';
-            emptyState.style.display = 'block';
-            return;
-        }
-
-        emptyState.style.display = 'none';
-        grid.innerHTML = filtered.map(coin => this.createCoinCard(coin)).join('');
-
-        // Re-add event listeners (selection + full-card click)
-        filtered.forEach(coin => {
-            const sel = document.getElementById(`select-${coin.id}`);
-            if (sel) {
-                sel.addEventListener('change', (e) => {
-                    if (e.target.checked) this.selectedForPrint.add(coin.id);
-                    else this.selectedForPrint.delete(coin.id);
-                    this.updatePrintBar();
-                    const cardEl = document.querySelector(`[data-card-id="${coin.id}"]`);
-                    if (cardEl) cardEl.classList.toggle('selected', e.target.checked);
-                });
-            }
-            const card = document.querySelector(`[data-card-id="${coin.id}"]`);
-            if (card) {
-                card.addEventListener('click', (e) => {
-                    const isControl = e.target.closest('.coin-card-actions') || e.target.closest('.print-select') || e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON';
-                    if (isControl) return;
-                    this.viewCoin(coin.id);
-                });
-            }
-        });
+        this._searchTerm = String(searchTerm || '');
+        this.renderCoins();
     }
 
     // Sort coins
-    sortCoins(sortBy) {
-        switch (sortBy) {
-            case 'newest':
-                this.coins.sort((a, b) => new Date(b.addedDate) - new Date(a.addedDate));
-                break;
-            case 'oldest':
-                this.coins.sort((a, b) => new Date(a.addedDate) - new Date(b.addedDate));
-                break;
-            case 'name':
-                this.coins.sort((a, b) => a.name.localeCompare(b.name));
-                break;
-        }
-        this.renderCoins();
+    sortCoins(sortBy, { skipRender = false } = {}) {
+        const mode = this._sortCoinsInPlace(sortBy || this._currentSort || 'struck');
+        this._currentSort = mode;
+        if (!skipRender) this.renderCoins();
     }
 }
 
