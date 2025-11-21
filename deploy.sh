@@ -1,65 +1,71 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deployment script for coinflip application
-# This script is called by GitHub Actions runner after code is pulled
+# Simplified deployment script for static coinflip site (nginx + coin-images)
+# Assumes this repo contains docker-compose.yml with a single 'web' service
 
-echo "🚀 Starting deployment..."
+SERVICE=web
+PORT=8080
+PROJECT_DIR=/opt/coinflip
 
-# Navigate to project directory (should already be there but ensure it)
-cd /opt/coinflip
+echo "🚀 Starting deployment (service: $SERVICE, port: $PORT)..."
 
-# Pull latest changes (should already be done by Actions, but safety check)
-echo "📥 Ensuring latest code..."
+cd "$PROJECT_DIR"
+
+echo "📥 Updating source..."
 git fetch origin
 git reset --hard origin/main
 
-# Verify .env file exists
-if [ ! -f .env ]; then
-    echo "❌ Error: .env file not found!"
-    echo "Please create .env from .env.example with your domain and email"
+# Ensure required files exist
+for f in docker-compose.yml nginx.conf index.html app.js styles.css; do
+    if [ ! -f "$f" ]; then
+        echo "❌ Missing required file: $f"; exit 1
+    fi
+done
+
+# Ensure coin-images directory exists
+if [ ! -d coin-images ]; then
+    echo "📁 Creating coin-images directory..."
+    mkdir -p coin-images
+fi
+
+echo "🐳 Pulling latest image(s)..."
+docker compose pull "$SERVICE" || true
+
+echo "🔄 Starting / updating container..."
+docker compose up -d "$SERVICE"
+
+echo "⏳ Waiting for container to report 'Up'..."
+sleep 4
+if ! docker compose ps | grep -q "$SERVICE.*Up"; then
+    echo "❌ $SERVICE container not Up"
+    docker compose logs --tail=80 "$SERVICE"
     exit 1
 fi
 
-# Build and deploy with Docker Compose
-echo "🐳 Building Docker images..."
-docker compose build --no-cache coinflip-app
-
-echo "🔄 Restarting services..."
-docker compose up -d
-
-# Wait for containers to be running
-echo "⏳ Waiting for containers to start..."
-sleep 5
-
-# Check if containers are running
-if ! docker compose ps | grep -q "coinflip-app.*Up"; then
-    echo "❌ coinflip-app container failed to start"
-    docker compose logs --tail=50 coinflip-app
-    exit 1
-fi
-
-# Test if the app is actually responding
-echo "🔍 Testing application response..."
+echo "🔍 Health check on http://localhost:$PORT/index.html"
 max_attempts=10
 attempt=0
-until curl -f http://localhost:80 > /dev/null 2>&1 || [ $attempt -eq $max_attempts ]; do
-    attempt=$((attempt + 1))
-    if [ $attempt -eq $max_attempts ]; then
-        echo "❌ Application not responding on port 80"
-        docker compose logs --tail=50 coinflip-app
-        exit 1
-    fi
+until curl -fsS "http://localhost:$PORT/index.html" > /dev/null 2>&1 || [ $attempt -ge $max_attempts ]; do
+    attempt=$((attempt+1))
     echo "   Attempt $attempt/$max_attempts..."
     sleep 2
 done
 
-echo "✅ Application is responding!"
+if [ $attempt -ge $max_attempts ]; then
+    echo "❌ Site did not respond on port $PORT"
+    docker compose logs --tail=80 "$SERVICE"
+    exit 1
+fi
 
-# Clean up old Docker images to save space
-echo "🧹 Cleaning up old images..."
-docker image prune -f
+echo "✅ Site responding. Listing coin-images (if any):"
+ls -1 coin-images || true
 
-echo "✅ Deployment complete!"
+echo "🧹 Pruning unused images..."
+docker image prune -f >/dev/null || true
+
 echo "📊 Service status:"
 docker compose ps
+
+echo "✅ Deployment complete! Access: http://<host>:$PORT/"
+echo "📄 To add images: copy files into coin-images/ then 'docker compose restart $SERVICE' (or they appear immediately if volume mounted)."
