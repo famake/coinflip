@@ -4,7 +4,7 @@ services:
     image: nginx:1.27-alpine
     container_name: coinflip-web
     ports:
-      - "8080:80"
+      - "80:80"
     volumes:
       - ./index.html:/usr/share/nginx/html/index.html:ro
       - ./app.js:/usr/share/nginx/html/app.js:ro
