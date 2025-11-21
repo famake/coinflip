@@ -838,44 +838,84 @@ LIMIT 200`;
             const era = (t.startsWith('-')) ? 'BCE' : 'CE';
             return { year, era };
         };
-        // Reign: scan P39 (position held) qualifiers P580 (start), P582 (end) filtered to Roman emperor (Q842606)
+        // Reign: scan all P39 (position held) with start/end qualifiers P580/P582 (broader than single position)
         if (claims.P39) {
             let earliest = null, latest = null;
             for (const c of claims.P39) {
-                const posSnak = c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value && c.mainsnak.datavalue.value.id;
-                if (posSnak && posSnak !== 'Q842606') continue; // Only Roman emperor
                 const qs = c.qualifiers || {};
                 const startSnaks = qs.P580 || [];
                 const endSnaks = qs.P582 || [];
-                const start = startSnaks[0] && startSnaks[0].datavalue && startSnaks[0].datavalue.value && startSnaks[0].datavalue.value.time;
-                const end = endSnaks[0] && endSnaks[0].datavalue && endSnaks[0].datavalue.value && endSnaks[0].datavalue.value.time;
+                const start = startSnaks[0]?.datavalue?.value?.time;
+                const end = endSnaks[0]?.datavalue?.value?.time;
                 const startY = parseTimeYear(start);
                 const endY = parseTimeYear(end);
-                if (startY) {
-                    if (!earliest || startY.year < earliest.year || (startY.era === 'BCE' && earliest.era === 'CE')) earliest = startY;
-                }
-                if (endY) {
-                    if (!latest || endY.year > latest.year || (endY.era === 'CE' && latest.era === 'BCE')) latest = endY;
-                }
+                if (startY && (!earliest || startY.year < earliest.year || (startY.era === 'BCE' && earliest.era === 'CE'))) earliest = startY;
+                if (endY && (!latest || endY.year > latest.year || (endY.era === 'CE' && latest.era === 'BCE'))) latest = endY;
             }
-            if (earliest || latest) {
-                out.reign = { start: earliest || null, end: latest || null };
-            }
+            if (earliest || latest) out.reign = { start: earliest || null, end: latest || null };
         }
-        // Parents: father (P22), mother (P25) - store QIDs only to honor gating
+        // Birth / Death dates (P569 / P570) and places (P19 / P20)
+        const birthTime = claims.P569?.[0]?.mainsnak?.datavalue?.value?.time || null;
+        const deathTime = claims.P570?.[0]?.mainsnak?.datavalue?.value?.time || null;
+        const birthY = parseTimeYear(birthTime);
+        const deathY = parseTimeYear(deathTime);
+        if (birthY) out.birth = birthY;
+        if (deathY) out.death = deathY;
+        const birthPlace = claims.P19?.[0]?.mainsnak?.datavalue?.value?.id || null;
+        const deathPlace = claims.P20?.[0]?.mainsnak?.datavalue?.value?.id || null;
+        if (birthPlace) out.birth_place = birthPlace;
+        if (deathPlace) out.death_place = deathPlace;
+        // Parents: father (P22), mother (P25)
         const father = (claims.P22 && claims.P22[0] && claims.P22[0].mainsnak && claims.P22[0].mainsnak.datavalue && claims.P22[0].mainsnak.datavalue.value && claims.P22[0].mainsnak.datavalue.value.id) || null;
+        const mother = (claims.P25 && claims.P25[0] && claims.P25[0].mainsnak && claims.P25[0].mainsnak.datavalue && claims.P25[0].mainsnak.datavalue.value && claims.P25[0].mainsnak.datavalue.value.id) || null;
         if (father || mother) out.parents = { father, mother };
-        // Spouse(s) P26
+        // Spouse(s) / consorts P26
         if (claims.P26) {
-            out.spouses = claims.P26.map(c => c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value && c.mainsnak.datavalue.value.id).filter(Boolean);
+            out.spouses = claims.P26.map(c => c?.mainsnak?.datavalue?.value?.id).filter(Boolean);
             if (!out.spouses.length) delete out.spouses;
+        }
+        // Children P40
+        if (claims.P40) {
+            out.children = claims.P40.map(c => c?.mainsnak?.datavalue?.value?.id).filter(Boolean);
+            if (!out.children.length) delete out.children;
+        }
+        // Predecessor P1365 / Successor P1366 (rulership context)
+        if (claims.P1365) {
+            out.predecessors = claims.P1365.map(c => c?.mainsnak?.datavalue?.value?.id).filter(Boolean);
+            if (!out.predecessors.length) delete out.predecessors;
+        }
+        if (claims.P1366) {
+            out.successors = claims.P1366.map(c => c?.mainsnak?.datavalue?.value?.id).filter(Boolean);
+            if (!out.successors.length) delete out.successors;
         }
         // Dynasty / family P53
         if (claims.P53) {
             out.dynasties = claims.P53.map(c => c.mainsnak && c.mainsnak.datavalue && c.mainsnak.datavalue.value && c.mainsnak.datavalue.value.id).filter(Boolean);
             if (!out.dynasties.length) delete out.dynasties;
         }
-        return Object.keys(out).length ? out : null;
+        if (Object.keys(out).length) { try { console.debug('[BioClaims]', { id: ent?.id, keys: Object.keys(out) }); } catch(_){} return out; }
+        try { console.debug('[BioClaims] none extracted', { id: ent?.id }); } catch(_){}
+        return null;
+    }
+
+    async _fetchWikidataNeighborsDetails(qids = []) {
+        const ids = Array.from(new Set((qids||[]).filter(q => /^Q\d+$/i.test(q))));
+        if (!ids.length) return {};
+        try {
+            const url = `https://www.wikidata.org/w/api.php?action=wbgetentities&props=labels|sitelinks&sitefilter=enwiki&languages=en&ids=${encodeURIComponent(ids.join('|'))}&format=json&origin=*`;
+            const res = await this._fetchWithTimeout(url, { timeout: 12000 });
+            const data = await res.json();
+            const out = {};
+            const entities = data?.entities || {};
+            Object.keys(entities).forEach(q => {
+                const e = entities[q];
+                out[q] = {
+                    label: e?.labels?.en?.value || q,
+                    title: e?.sitelinks?.enwiki?.title || null
+                };
+            });
+            return out;
+        } catch (_) { return {}; }
     }
 
     _resolveMintCoordinates(primary, fallback) {
@@ -1117,8 +1157,296 @@ LIMIT 200`;
             const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
             const res = await this._fetchWithTimeout(summaryUrl, { timeout: 12000 });
             if (!res.ok) return null;
-            return await res.json();
-        } catch (_) { return null; }
+            const data = await res.json();
+            try {
+                const long = await this._fetchWikipediaLongContent(title);
+                if (long?.html) {
+                    data.long_html = long.html;
+                }
+                if (!data.long_extract && long?.plain) {
+                    const cleaned = this._cleanWikipediaIntro(long.plain);
+                    data.long_extract = cleaned;
+                    // If we only had HTML produced from original plain fallback, regenerate HTML from cleaned plain when original was fallback (no parse HTML structure)
+                    if (!long.html) data.long_html = this._formatWikipediaPlain(cleaned);
+                }
+            } catch (err) {
+                console.warn('[WikiFetch] longExtract error for', title, err);
+            }
+            console.log('[WikiFetch] summary data for', title, ':', data);
+            return data;
+        } catch (err) {
+            console.warn('[WikiFetch] summary error for', title, err);
+            return null;
+        }
+    }
+
+    async _fetchWikipediaExtract(title, { chars = null } = {}) {
+        try {
+            // If chars is provided, clamp to MediaWiki limit (1..1200). If null, omit exchars to get full page plaintext.
+            const exchars = (Number.isFinite(chars) && chars != null) ? Math.max(1, Math.min(1200, Math.floor(chars))) : null;
+            const extractUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&format=json&redirects=1&explaintext=1${exchars?`&exchars=${exchars}`:''}&exsectionformat=plain&titles=${encodeURIComponent(title)}&origin=*`;
+            console.log('[WikiFetch] extractUrl:', extractUrl);
+            const res = await this._fetchWithTimeout(extractUrl, { timeout: 12000 });
+            if (!res.ok) {
+                console.warn('[WikiFetch] extract fetch failed', extractUrl, res.status);
+                return null;
+            }
+            const data = await res.json();
+            console.log('[WikiFetch] extract data:', data);
+            const pages = data?.query?.pages || {};
+            const firstKey = Object.keys(pages)[0];
+            const extract = firstKey ? pages[firstKey]?.extract : null;
+            return extract ? extract.trim() : null;
+        } catch (err) {
+            console.warn('[WikiFetch] extract error for', title, err);
+            return null;
+        }
+    }
+
+    // Fetch long, sectioned HTML using Action API parse (CORS-safe), fallback to plaintext extract.
+    async _fetchWikipediaLongContent(title) {
+        // 1) Action API parse with HTML + sections (CORS via origin=*)
+        try {
+            const parseUrl = `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(title)}&prop=text%7Csections&format=json&formatversion=2&redirects=1&disableeditsection=1&origin=*`;
+            const res = await this._fetchWithTimeout(parseUrl, { timeout: 15000 });
+            if (res.ok) {
+                const data = await res.json();
+                const rawHtml = data?.parse?.text || '';
+                if (rawHtml && typeof rawHtml === 'string') {
+                    const html = this._sanitizeWikiHtml(rawHtml);
+                    const plain = this._stripHtmlToPlain(html);
+                    return { html, plain };
+                }
+            } else {
+                console.warn('[WikiFetch] parse API HTTP', res.status, 'for', title);
+            }
+        } catch (e) {
+            console.warn('[WikiFetch] parse API failed for', title, e);
+        }
+        // 2) Fallback to full plaintext extract (omit exchars)
+        try {
+            const full = await this._fetchWikipediaExtract(title, { chars: null });
+            if (full) {
+                const cleaned = this._cleanWikipediaIntro(full);
+                return { html: this._formatWikipediaPlain(cleaned), plain: cleaned };
+            }
+        } catch (e) {
+            console.warn('[WikiFetch] fallback extract failed for', title, e);
+        }
+        return null;
+    }
+
+    _buildWikiSectionsHtml(ms) {
+        try {
+            const blocks = [];
+            const sanitize = (html) => this._sanitizeWikiHtml(html || '');
+            const lead = ms?.lead?.sections?.[0];
+            if (lead?.text) blocks.push(sanitize(lead.text));
+            const sections = Array.isArray(ms?.remaining?.sections) ? ms.remaining.sections : [];
+            for (const s of sections) {
+                const heading = (s.line || '').trim();
+                if (heading) blocks.push(`<h4>${this.escapeHtml(heading)}</h4>`);
+                if (s.text) blocks.push(sanitize(s.text));
+            }
+            return blocks.join('\n');
+        } catch (_) { return ''; }
+    }
+
+    _sanitizeWikiHtml(html) {
+        // Very lightweight sanitizer: drop scripts/styles and dangerous attributes
+        let s = String(html || '');
+        // Pre-strip common non-content and code artifacts
+        try {
+            // Remove reference footnotes like <sup class="reference">[1]</sup>
+            s = s.replace(/<sup[^>]*class=["'][^"']*reference[^"']*["'][^>]*>[\s\S]*?<\/sup>/gi, '');
+            // Remove Table of contents
+            s = s.replace(/<div[^>]*class=["'][^"']*toc[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, '');
+            // Remove ANY tables entirely (infoboxes, navboxes, royal titulary, etc.)
+            s = s.replace(/<table[\s\S]*?<\/table>/gi, '');
+            // Remove common image/gallery/thumb wrappers
+            s = s.replace(/<div[^>]*class=["'][^"']*(thumb|tmulti|gallery|sister(project)?box|shortdescription|rellink|infobox)[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, '');
+            // Remove edit section spans
+            s = s.replace(/<span[^>]*class=["'][^"']*mw-editsection[^"']*["'][^>]*>[\s\S]*?<\/span>/gi, '');
+            // Remove code/pre blocks entirely
+            s = s.replace(/<pre[^>]*>[\s\S]*?<\/pre>/gi, '');
+            s = s.replace(/<code[^>]*>[\s\S]*?<\/code>/gi, '');
+            // Remove hatnote containers entirely (disambiguation blurbs)
+            s = s.replace(/<div[^>]*class=["'][^"']*hatnote[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, '');
+        } catch (_) {}
+        // Remove full script/style blocks first (order matters)
+        s = s.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, '')
+             .replace(/ on[a-z]+="[^"]*"/gi, '')
+             .replace(/ on[a-z]+='[^']*'/gi, '')
+             .replace(/javascript:/gi, '');
+        // Drop any leftover MediaWiki CSS artifacts that leaked as text
+        s = s.replace(/\.mw-parser-output[^{}]*\{[^}]*\}/gi, '')
+             .replace(/@media[^{}]*\{[^}]*\}/gi, '')
+             .replace(/\.infobox[^{}]*\{[^}]*\}/gi, '');
+        // Allow only a safe subset of tags; strip others but keep text
+        const allowed = ['p','ul','ol','li','b','i','em','strong','a','h2','h3','h4','figure','figcaption','img','br'];
+        let imageCount = 0;
+        const IMAGE_LIMIT = 6; // cap number of images per sanitized block
+        s = s.replace(/<\/?([a-z0-9-]+)(\s[^>]*?)?>/gi, (m, tag, attrs='') => {
+            tag = tag.toLowerCase();
+            const isClose = /^<\//.test(m);
+            if (!allowed.includes(tag)) return '';
+            if (isClose) {
+                if (tag === 'img' || tag === 'br') return '';
+                return `</${tag}>`;
+            }
+            if (tag === 'a') {
+                const hrefMatch = attrs.match(/href=("([^"]*)"|'([^']*)')/i);
+                let href = hrefMatch ? (hrefMatch[2] || hrefMatch[3] || '#') : '#';
+                if (/^\/\//.test(href)) href = 'https:' + href; // protocol-relative
+                else if (/^\//.test(href)) href = 'https://en.wikipedia.org' + href; // root-relative
+                return `<a href="${this.escapeHtml(href)}" target="_blank" rel="noopener">`;
+            }
+            if (tag === 'img') {
+                if (imageCount >= IMAGE_LIMIT) return ''; // enforce limit
+                const srcMatch = attrs.match(/src=("([^"]*)"|'([^']*)')/i);
+                let src = srcMatch ? (srcMatch[2] || srcMatch[3] || '') : '';
+                if (/^\/\//.test(src)) src = 'https:' + src; // protocol-relative
+                else if (/^\//.test(src)) src = 'https://en.wikipedia.org' + src; // root-relative
+                const altMatch = attrs.match(/alt=("([^"]*)"|'([^']*)')/i);
+                const alt = altMatch ? (altMatch[2] || altMatch[3] || '') : '';
+                // Filter out non-content or tiny images
+                const MIN_PX = 160;
+                let widthAttr = null, heightAttr = null;
+                const wMatch = attrs.match(/\bwidth=("(\d+)"|'(\d+)'|(\d+))/i);
+                const hMatch = attrs.match(/\bheight=("(\d+)"|'(\d+)'|(\d+))/i);
+                widthAttr = wMatch ? Number(wMatch[2] || wMatch[3] || wMatch[4] || 0) : null;
+                heightAttr = hMatch ? Number(hMatch[2] || hMatch[3] || hMatch[4] || 0) : null;
+                let thumbPx = null;
+                const pxm = src.match(/\/(\d+)px-/i);
+                if (pxm) thumbPx = Number(pxm[1]);
+                // Only allow images from upload.wikimedia.org (actual content repository)
+                try {
+                    const u = new URL(src);
+                    const host = (u.hostname || '').toLowerCase();
+                    if (!/upload\.wikimedia\.org$/.test(host)) return '';
+                } catch(_) { return ''; }
+                const eff = Math.max(
+                    Number.isFinite(widthAttr) ? widthAttr : 0,
+                    Number.isFinite(heightAttr) ? heightAttr : 0,
+                    Number.isFinite(thumbPx) ? thumbPx : 0
+                );
+                if (eff && eff < MIN_PX) return '';
+                if (/\/(icons|ui|toolbar)\//i.test(src)) return '';
+                imageCount += 1;
+                return src ? `<img src="${this.escapeHtml(src)}" alt="${this.escapeHtml(alt)}" loading="lazy" decoding="async">` : '';
+            }
+            return `<${tag}>`;
+        });
+        // Advanced lead selection: choose first narrative paragraph (contains a verb + period), skip structured field residue
+        const paraMatches = [...s.matchAll(/<p>([\s\S]*?)<\/p>/gi)];
+        if (paraMatches.length) {
+            const fieldToken = /\b(Reign|Predecessor|Successor|Born|Died|Consorts?|Consort|Children|Father|Mother|Dynasty|Nomen|Praenomen|Nebty|Horus|Royal titulary)\b/i;
+            let narrativeIdx = -1;
+            for (let i=0;i<paraMatches.length;i++){
+                const raw = paraMatches[i][1] || '';
+                const plain = raw.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+                const hasVerb = /\b(was|is|were|are|became|ruled)\b/i.test(plain);
+                const hasPeriod = /\./.test(plain);
+                const looksFields = fieldToken.test(plain) && !hasPeriod;
+                // If very short, skip
+                if (!hasVerb || !hasPeriod) continue;
+                if (looksFields) continue;
+                // Require minimal length for narrative
+                if (plain.length < 80) continue;
+                narrativeIdx = i; break;
+            }
+            const chosen = narrativeIdx >=0 ? paraMatches[narrativeIdx].index : paraMatches[0].index;
+            if (chosen > 0) s = s.slice(chosen);
+            // Prune any structured prefix inside the chosen paragraph before the first verb
+            s = s.replace(/<p>([\s\S]*?)<\/p>/i,(m,inner)=>{
+                const verbPos = inner.search(/\b(was|is|were|are|became|ruled)\b/i);
+                if (verbPos <= 0) return m;
+                const prefix = inner.slice(0,verbPos);
+                const prefixTokens = (prefix.match(/\b[A-Z][a-z]+\b/g)||[]).length;
+                const prefixHasFields = fieldToken.test(prefix) || /<br\s*\/?>/i.test(prefix);
+                if ((prefixHasFields || prefixTokens > 6) && verbPos < inner.length - 20){
+                    return `<p>${inner.slice(verbPos).trim()}</p>`;
+                }
+                return m;
+            });
+        }
+        // Collapse excessive blank lines and stray CSS remnants
+        s = s.replace(/\n{3,}/g, '\n\n')
+             .replace(/[ \t]+\n/g, '\n')
+             .replace(/\n[ \t]+/g, '\n')
+             .trim();
+        // Remove leading/trailing punctuation-only lines
+        s = s.split(/\n/).filter(line => !/^\s*[{}.;@]+\s*$/.test(line)).join('\n');
+        // Close tags that we replaced opening with minimal attrs; simple approach
+        return s;
+    }
+
+    _stripHtmlToPlain(html) {
+        if (!html) return '';
+        const s = String(html).replace(/<\/(p|li|h[2-6])>/gi, '\n\n').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '');
+        return s.replace(/[\t ]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    _formatWikipediaPlain(text) {
+        if (!text) return '';
+        const safe = String(text).trim();
+        if (!safe) return '';
+        // Split into paragraphs by blank lines; join single newlines within a paragraph as spaces
+        const paras = safe.split(/\n{2,}/);
+        const blocks = [];
+        for (let i = 0; i < paras.length; i++) {
+            const raw = paras[i].trim();
+            if (!raw) continue;
+            // If paragraph looks like a short heading (few words, no final punctuation), render as <h4>
+            const isHeading = /^[A-Z][A-Za-z0-9 ,\-–'()]{1,80}$/.test(raw) && !/[.!?]$/.test(raw) && raw.split(/\s+/).length <= 8;
+            if (isHeading) { blocks.push(`<h4>${this.escapeHtml(raw)}</h4>`); continue; }
+            // Lists: lines starting with * or -
+            if (/^[*•-]\s/m.test(raw)) {
+                const items = raw.split(/\n+/).map(l => l.replace(/^[*•-]\s+/, '').trim()).filter(Boolean);
+                if (items.length) { blocks.push('<ul>' + items.map(it => `<li>${this.escapeHtml(it)}</li>`).join('') + '</ul>'); continue; }
+            }
+            const merged = raw.replace(/\n+/g, ' ').replace(/[ \t]{2,}/g, ' ');
+            blocks.push('<p>' + this.escapeHtml(merged) + '</p>');
+        }
+        return blocks.join('\n');
+    }
+
+    // Remove leading infobox-like metadata from Wikipedia plaintext extracts.
+    _cleanWikipediaIntro(text) {
+        if (!text) return '';
+        let t = String(text).trim();
+        if (t.length < 280) return t; // unlikely to contain large infobox section
+        const boxKeywords = [
+            'Reign','Predecessor','Successor','Born','Died','Consorts','Consort','Children','Father','Mother','Dynasty','Nomen','Praenomen','Horus name','Nebty name','Golden Horus','Royal titulary','Spouses'
+        ];
+        const lines = t.split(/\n+/);
+        let narrativeLineIdx = -1;
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            if (line.length > 60 && /\bwas\b/.test(line) && /[.]/.test(line)) { narrativeLineIdx = i; break; }
+        }
+        if (narrativeLineIdx <= 0) {
+            // fallback regex search inside text
+            const m = t.match(/[A-Z][^\n]{0,180}\bwas\b/);
+            if (m && m.index > 0) {
+                const prefix = t.slice(0, m.index);
+                let score = 0;
+                boxKeywords.forEach(k => { if (new RegExp('\b'+k.replace(/[-]/g,'[-]')+'\b','i').test(prefix)) score++; });
+                if (score >= 2) return t.slice(m.index).trim();
+                return t;
+            }
+            return t;
+        }
+        const prefixLines = lines.slice(0, narrativeLineIdx);
+        let boxScore = 0;
+        const prefixText = prefixLines.join(' ');
+        boxKeywords.forEach(k => { if (new RegExp('\b'+k.replace(/[-]/g,'[-]')+'\b','i').test(prefixText)) boxScore++; });
+        const shortHeadingLines = prefixLines.filter(l => l && l.length < 120 && !/[.!?]/.test(l)).length;
+        const shouldTrim = boxScore >= 2 || shortHeadingLines >= 6;
+        if (!shouldTrim) return t;
+        const cleaned = lines.slice(narrativeLineIdx).join('\n').replace(/\n{3,}/g,'\n\n').trim();
+        return cleaned || t;
     }
 
     // WDQS and Nomisma period enumeration helpers removed; period is manual URL now
@@ -3902,11 +4230,26 @@ LIMIT 200`;
                     return slice.replace(/[\s,.]+$/,'') + '…';
                 };
                 const renderCard = (title, info, nmFallback, opts={}) => {
+                    if (info?.wikipedia) {
+                        console.log('[LearnMore] Wikipedia summary:', {
+                            title,
+                            extract: info.wikipedia.extract,
+                            long_extract: info.wikipedia.long_extract,
+                            url: info.wikipedia.content_urls?.desktop?.page
+                        });
+                    }
                     if (!info && !nmFallback) return '';
                     const label = info?.label || nmFallback?.label || title;
-                    const fullDesc = info?.wikipedia?.extract || info?.description || nmFallback?.definition || '';
+                    const fullDescRaw = info?.wikipedia?.long_extract || info?.wikipedia?.extract || info?.description || nmFallback?.definition || '';
+                    const fullHtmlRaw = info?.wikipedia?.long_html || null;
+                    const fullDesc = fullDescRaw;
                     const isPeriod = opts.period === true;
-                    const desc = isPeriod ? truncate(fullDesc, 220) : fullDesc;
+                    const cardKey = opts.key || title.toLowerCase().replace(/[^a-z0-9]+/gi,'-');
+                    const allowReadMore = !!fullDesc && opts.readMore;
+                    const summaryLimit = opts.summaryLimit ?? (isPeriod ? 230 : 260);
+                    const truncatedDesc = fullDesc ? (allowReadMore ? truncate(fullDesc, summaryLimit) : fullDesc) : '';
+                    const isTruncated = allowReadMore && !!fullDesc && truncatedDesc !== fullDesc;
+                    const descId = isTruncated ? `${cardKey}Desc` : null;
                     const thumb = info?.wikipedia?.thumbnail?.source || '';
                     const wikiUrl = info?.wikipedia?.content_urls?.desktop?.page || null;
                     const wdUrl = info?.qid ? `https://www.wikidata.org/wiki/${info.qid}` : null;
@@ -3925,7 +4268,6 @@ LIMIT 200`;
                         }
                         return '';
                     })();
-                    const learnBtn = isPeriod ? `<div style=\"margin-top:6px\"><button type=\"button\" id=\"learnPeriodBtn\" class=\"btn-link\">Learn more about this period</button></div>` : '';
                     const mintCoords = opts.mint ? this._resolveMintCoordinates(info, nmFallback) : null;
                     const mapHtml = (opts.mint && mintCoords) ? this._renderMintMap(mintCoords, label) : '';
                     if (opts.mint) {
@@ -3948,18 +4290,59 @@ LIMIT 200`;
                         if (src==='nomisma' && nmUrl) return `<a class=\"source-chip nomisma\" href=\"${this.escapeHtml(nmUrl)}\" target=\"_blank\" rel=\"noopener\" title=\"Nomisma: ${this.escapeHtml(nmUrl)}\">Nomisma</a>`;
                         return chip(src);
                     }).join(' ');
+                    let descBlock = `<div class=\"ruler-desc\" style=\"color:#6b7280\">No additional summary available.</div>`;
+                    if (fullDesc) {
+                        const descTitle = descSrc ? ` title=\"Summary from ${this.escapeHtml(descSrc)}\"` : '';
+                        if (isTruncated && descId) {
+                            const longHtml = fullHtmlRaw || this._formatWikipediaPlain(fullDesc);
+                            descBlock = `<div class=\"ruler-desc\" id=\"${descId}\" data-expanded=\"false\"${descTitle}><div class=\"desc-short\">${this.escapeHtml(truncatedDesc)}</div><div class=\"desc-long\" hidden>${longHtml}</div></div>`;
+                        } else {
+                            const displayDesc = truncatedDesc || fullDesc;
+                            const longHtml = fullHtmlRaw ? fullHtmlRaw : this._formatWikipediaPlain(displayDesc);
+                            descBlock = `<div class=\"ruler-desc\"${descTitle}>${longHtml}</div>`;
+                        }
+                    }
+                    const readBtnHtml = isTruncated && descId ? `<button type=\"button\" class=\"btn-link learnmore-btn\" data-desc-target=\"${descId}\" aria-expanded=\"false\">Read more</button>` : '';
+                    const timelineBtnHtml = isPeriod ? `<button type=\"button\" class=\"btn-link learnmore-btn\" data-period-timeline=\"true\">Timeline explorer</button>` : '';
+                    const actionsHtml = (readBtnHtml || timelineBtnHtml) ? `<div class=\"learnmore-actions\">${readBtnHtml}${timelineBtnHtml}</div>` : '';
+                    const needsUpgrade = (!!wikiUrl && !info?.wikipedia?.long_html);
+                    const wikiTitle = info?.wikipedia?.title || info?.label || '';
+                    const relationsPlaceholder = (opts.key==='ruler') ? `<div class=\"bio-rel\" data-rel-holder=\"true\"></div>` : '';
+                    const factsPlaceholder = (opts.key==='ruler') ? `<div class=\"bio-facts\" data-facts-holder=\"true\"><div class=\"bio-facts-head\">Bio (Wikidata)</div></div>` : '';
+                    if (opts.key==='material' && fullDesc) {
+                        try { console.debug('[MaterialCard] restricting to first paragraph'); } catch(_){}
+                        const firstPara = fullDesc.split(/\n\n+/)[0].trim();
+                        const longHtml = this._formatWikipediaPlain(firstPara);
+                        descBlock = `<div class=\"ruler-desc\">${longHtml}</div>`;
+                    }
                     return `
-                        <div class=\"card collapsible\">\n                            <h3 class=\"collapsible-head\"><span class=\"caret\"></span>${this.escapeHtml(title)} ${chips}</h3>\n                            <div class=\"collapse-body\">\n                                <div class=\"ruler-card\">\n                                    ${thumb ? `<img class=\"ruler-avatar\" src=\"${this.escapeHtml(thumb)}\" alt=\"\" aria-hidden=\"true\">` : ''}\n                                    <div>\n                                        <div class=\"ruler-name-row\"><div class=\"ruler-name\" title=\"${labelSrc?`Label from ${this.escapeHtml(labelSrc)}`:''}\">${this.escapeHtml(label)}</div> ${years ? `<span class=\"years\">${years}</span>` : ''}</div>\n                                        ${desc ? `<div class=\"ruler-desc\" title=\"${descSrc?`Summary from ${this.escapeHtml(descSrc)}`:''}\">${this.escapeHtml(desc)}</div>` : `<div class=\"ruler-desc\" style=\"color:#6b7280\">No additional summary available.</div>`}\n                                        ${learnBtn}\n                                    </div>\n                                </div>\n                                ${mapHtml}\n                            </div>\n                        </div>`;
+                        <div class=\"card collapsible\" data-learn-card=\"${this.escapeHtml(cardKey)}\"${needsUpgrade?` data-upgrade-desc=\"true\" data-wiki-title=\"${this.escapeHtml(wikiTitle)}\"`:''}>\n                            <h3 class=\"collapsible-head\"><span class=\"caret\"></span>${this.escapeHtml(title)} ${chips}</h3>\n                            <div class=\"collapse-body\">\n                                <div class=\"ruler-card\">\n                                    ${thumb ? `<div class=\"ruler-avatar-wrap\"><img class=\"ruler-avatar\" src=\"${this.escapeHtml(thumb)}\" alt=\"\" aria-hidden=\"true\"></div>` : ''}\n                                    <div>\n                                        <div class=\"ruler-name-row\"><div class=\"ruler-name\" title=\"${labelSrc?`Label from ${this.escapeHtml(labelSrc)}`:''}\">${this.escapeHtml(label)}</div> ${years ? `<span class=\"years\">${years}</span>` : ''}</div>\n                                        ${factsPlaceholder}\n                                        ${relationsPlaceholder}\n                                        ${descBlock}\n                                        ${actionsHtml}\n                                    </div>\n                                </div>\n                                ${mapHtml}\n                            </div>\n                        </div>`;
                 };
                 const parts = [];
-                if (ainfo || nmRuler) parts.push(renderCard('About the ruler', ainfo, nmRuler));
-                if (pinfo || nmPeriod) parts.push(renderCard('About the period', pinfo, nmPeriod, { period: true }));
-                if (matInfo || nmMaterial) parts.push(renderCard('About the material', matInfo, nmMaterial));
-                if (minfo || nmMint) parts.push(renderCard('About the mint', minfo, nmMint, { mint: true }));
+                if (ainfo || nmRuler) parts.push(renderCard('About the ruler', ainfo, nmRuler, { key:'ruler', readMore:true }));
+                if (pinfo || nmPeriod) parts.push(renderCard('About the period', pinfo, nmPeriod, { period: true, key:'period', readMore:true }));
+                if (matInfo || nmMaterial) parts.push(renderCard('About the material', matInfo, nmMaterial, { key:'material' }));
+                if (minfo || nmMint) parts.push(renderCard('About the mint', minfo, nmMint, { mint: true, key:'mint' }));
                 lmHost.innerHTML = parts.join('');
-                // Wire period learn button
-                const lp = document.getElementById('learnPeriodBtn');
-                if (lp) lp.addEventListener('click', ()=> this.openHistoryExplorer(coin.id));
+                // Wire description expanders
+                lmHost.querySelectorAll('[data-desc-target]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const targetId = btn.getAttribute('data-desc-target');
+                        if (!targetId) return;
+                        const descEl = document.getElementById(targetId);
+                        if (!descEl) return;
+                        const shortEl = descEl.querySelector('.desc-short');
+                        const longEl = descEl.querySelector('.desc-long');
+                        if (!shortEl || !longEl) return;
+                        const expanded = descEl.classList.toggle('expanded');
+                        shortEl.hidden = expanded;
+                        longEl.hidden = !expanded;
+                        btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                        btn.textContent = expanded ? 'Show less' : 'Read more';
+                    });
+                });
+                const periodTimelineBtn = lmHost.querySelector('[data-period-timeline]');
+                if (periodTimelineBtn) periodTimelineBtn.addEventListener('click', ()=> this.openHistoryExplorer(coin.id));
                 // Initialize collapsible headers (Learn More cards)
                 lmHost.querySelectorAll('.collapsible-head').forEach(head => {
                     head.addEventListener('click', () => {
@@ -3968,8 +4351,331 @@ LIMIT 200`;
                         card.classList.toggle('collapsed');
                     });
                 });
+                // On-the-fly Wikipedia long content upgrade for cards missing it
+                const upgradeCards = Array.from(lmHost.querySelectorAll('.card[data-upgrade-desc=\"true\"][data-wiki-title]'));
+                for (const card of upgradeCards) {
+                    const title = card.getAttribute('data-wiki-title');
+                    if (!title) continue;
+                    (async () => {
+                        try {
+                            console.log('[LearnMoreUpgrade] fetching long extract for', title);
+                            const long = await this._fetchWikipediaLongContent(title);
+                            const longHtml = long?.html || (long?.plain ? this._formatWikipediaPlain(long.plain) : '');
+                            if (!longHtml) { console.log('[LearnMoreUpgrade] no long extract for', title); return; }
+                            const desc = card.querySelector('.ruler-desc');
+                            if (!desc) return;
+                            let shortEl = desc.querySelector('.desc-short');
+                            let longEl = desc.querySelector('.desc-long');
+                            const existingShort = shortEl ? shortEl.textContent || '' : desc.textContent || '';
+                            // If structure not present, create it now
+                            if (!shortEl || !longEl) {
+                                desc.innerHTML = '';
+                                shortEl = document.createElement('div');
+                                shortEl.className = 'desc-short';
+                                shortEl.textContent = existingShort.trim();
+                                longEl = document.createElement('div');
+                                longEl.className = 'desc-long';
+                                longEl.hidden = true;
+                                desc.appendChild(shortEl);
+                                desc.appendChild(longEl);
+                            }
+                            longEl.innerHTML = longHtml;
+                            // If we didn't render a Read more button initially, add one now
+                            let actions = card.querySelector('.learnmore-actions');
+                            if (!actions) {
+                                actions = document.createElement('div');
+                                actions.className = 'learnmore-actions';
+                                const bodyCol = card.querySelector('.ruler-card > div:last-child');
+                                if (bodyCol) bodyCol.appendChild(actions);
+                            }
+                            let toggleBtn = actions.querySelector('[data-desc-target]');
+                            if (!toggleBtn) {
+                                const id = `lmDesc-${Math.random().toString(36).slice(2)}`;
+                                desc.id = id;
+                                toggleBtn = document.createElement('button');
+                                toggleBtn.type = 'button';
+                                toggleBtn.className = 'btn-link learnmore-btn';
+                                toggleBtn.setAttribute('data-desc-target', id);
+                                toggleBtn.setAttribute('aria-expanded', 'false');
+                                toggleBtn.textContent = 'Read more';
+                                actions.prepend(toggleBtn);
+                                toggleBtn.addEventListener('click', () => {
+                                    const expanded = desc.classList.toggle('expanded');
+                                    shortEl.hidden = expanded;
+                                    longEl.hidden = !expanded;
+                                    toggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                                    toggleBtn.textContent = expanded ? 'Show less' : 'Read more';
+                                });
+                            }
+                            console.log('[LearnMoreUpgrade] long extract applied for', title);
+                        } catch (e) {
+                            console.warn('[LearnMoreUpgrade] failed for', title, e);
+                        }
+                    })();
+                }
+                // Populate bio relations (ruler only) if available
+                if (ainfo?.claims_parsed && lmHost.querySelector('[data-learn-card="ruler"] .bio-rel[data-rel-holder]')) {
+                    (async()=>{ try { await this._populateBioRelations(lmHost.querySelector('[data-learn-card="ruler"]'), ainfo.claims_parsed); } catch(_){} })();
+                } else {
+                    // Fallback: resolve QID from Wikipedia title and populate relations
+                    (async()=>{
+                        try {
+                            const rCard = lmHost.querySelector('[data-learn-card="ruler"]');
+                            if (!rCard) return;
+                            const t = rCard.getAttribute('data-wiki-title');
+                            const infoShim = { label: rCard.querySelector('.ruler-name')?.textContent || '', wikipedia: t? { title: t } : null };
+                            await this._ensureRulerBioRelationsFromWiki(lmHost, infoShim);
+                        } catch(_){ }
+                    })();
+                }
             }
         } catch (_) {}
+    }
+
+    async _populateBioRelations(rulerCardEl, claims) {
+        if (!rulerCardEl || !claims) return;
+        const holder = rulerCardEl.querySelector('.bio-rel[data-rel-holder]');
+        if (!holder) return;
+        const groups = [
+            { key:'predecessors', label:'Predecessor' },
+            { key:'successors', label:'Successor' },
+            { key:'spouses', label:'Consort' },
+            { key:'children', label:'Children' }
+        ];
+        const qidSets = [];
+        groups.forEach(g => { const arr = claims[g.key]; if (Array.isArray(arr) && arr.length) qidSets.push(...arr); });
+        const details = await this._fetchWikidataNeighborsDetails(qidSets);
+        const buildRow = (g) => {
+            const arr = Array.isArray(claims[g.key]) ? claims[g.key] : [];
+            if (!arr.length) return '';
+            const chips = arr.map(q => {
+                const d = details[q] || { label: q, title: null };
+                const titleAttr = d.title ? ` data-title="${this.escapeHtml(d.title)}"` : '';
+                return `<button type="button" class="bio-chip" data-qid="${this.escapeHtml(q)}"${titleAttr}>${this.escapeHtml(d.label || q)}</button>`;
+            }).join('');
+            return `<div class="bio-row"><div class="bio-label">${this.escapeHtml(g.label)}</div><div class="bio-chips">${chips}</div></div>`;
+        };
+        holder.removeAttribute('data-rel-holder');
+        holder.innerHTML = `<div class="bio-section">${groups.map(buildRow).filter(Boolean).join('')}</div>`;
+        holder.querySelectorAll('.bio-chip[data-qid]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const qid = btn.getAttribute('data-qid');
+                const title = btn.getAttribute('data-title');
+                this._loadRulerLearnMoreFromQid(qid, title);
+            });
+        });
+    }
+
+    async _populateBioFacts(rulerCardEl, claims) {
+        if (!rulerCardEl || !claims) return;
+        const holder = rulerCardEl.querySelector('.bio-facts[data-facts-holder]');
+        if (!holder) return;
+        const collectQids = [];
+        if (claims.birth_place) collectQids.push(claims.birth_place);
+        if (claims.death_place) collectQids.push(claims.death_place);
+        if (claims.dynasties) collectQids.push(...claims.dynasties);
+        if (claims.parents) { if (claims.parents.father) collectQids.push(claims.parents.father); if (claims.parents.mother) collectQids.push(claims.parents.mother); }
+        if (claims.spouses) collectQids.push(...claims.spouses);
+        if (claims.children) collectQids.push(...claims.children);
+        const details = await this._fetchWikidataNeighborsDetails(collectQids);
+        const chip = (qid) => {
+            const d = details[qid] || { label: qid, title: null };
+            const tAttr = d.title ? ` data-title="${this.escapeHtml(d.title)}"` : '';
+            return `<button type="button" class="bio-chip" data-qid="${this.escapeHtml(qid)}"${tAttr}>${this.escapeHtml(d.label || qid)}</button>`;
+        };
+        const rows = [];
+        const reignTxt = (()=>{
+            const r = claims.reign;
+            if (!r) return '';
+            const fy = r.start?.year, fe = r.start?.era || 'CE';
+            const ty = r.end?.year, te = r.end?.era || 'CE';
+            if (fy && ty) return fe===te? `${fy}–${ty} ${fe}` : `${fy} ${fe} – ${ty} ${te}`;
+            if (fy) return `${fy} ${fe}`;
+            if (ty) return `${ty} ${te}`;
+            return '';
+        })();
+        if (claims.birth || claims.birth_place) {
+            const parts = [];
+            if (claims.birth) parts.push(`${claims.birth.year} ${claims.birth.era||'CE'}`);
+            if (claims.birth_place) parts.push(chip(claims.birth_place));
+            rows.push(`<div class="bio-row"><div class="bio-label">Born</div><div class="bio-chips">${parts.join(' ')||'—'}</div></div>`);
+        }
+        if (claims.death || claims.death_place) {
+            const parts = [];
+            if (claims.death) parts.push(`${claims.death.year} ${claims.death.era||'CE'}`);
+            if (claims.death_place) parts.push(chip(claims.death_place));
+            rows.push(`<div class="bio-row"><div class="bio-label">Died</div><div class="bio-chips">${parts.join(' ')||'—'}</div></div>`);
+        }
+        if (reignTxt) rows.push(`<div class="bio-row"><div class="bio-label">Reign</div><div class="bio-chips">${reignTxt}</div></div>`);
+        if (Array.isArray(claims.dynasties) && claims.dynasties.length) rows.push(`<div class="bio-row"><div class="bio-label">Dynasty</div><div class="bio-chips">${claims.dynasties.map(chip).join('')}</div></div>`);
+        if (claims.parents && (claims.parents.father || claims.parents.mother)) rows.push(`<div class="bio-row"><div class="bio-label">Parents</div><div class="bio-chips">${[claims.parents.father, claims.parents.mother].filter(Boolean).map(chip).join('')||'—'}</div></div>`);
+        if (Array.isArray(claims.spouses) && claims.spouses.length) rows.push(`<div class="bio-row"><div class="bio-label">Consorts</div><div class="bio-chips">${claims.spouses.map(chip).join('')}</div></div>`);
+        if (Array.isArray(claims.children) && claims.children.length) rows.push(`<div class="bio-row"><div class="bio-label">Children</div><div class="bio-chips">${claims.children.map(chip).join('')}</div></div>`);
+        holder.removeAttribute('data-facts-holder');
+        holder.innerHTML = `<div class="bio-section">${rows.join('')}</div>`;
+        holder.querySelectorAll('.bio-chip[data-qid]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const qid = btn.getAttribute('data-qid');
+                const title = btn.getAttribute('data-title');
+                this._loadRulerLearnMoreFromQid(qid, title);
+            });
+        });
+    }
+
+    async _loadRulerLearnMoreFromQid(qid, titleHint=null) {
+        if (!qid) return;
+        try {
+            // Fetch entity for qid -> label/description + enwiki title; then Wikipedia summary+long
+            const entityUrl = `https://www.wikidata.org/wiki/Special:EntityData/${qid}.json`;
+            const res = await this._fetchWithTimeout(entityUrl, { timeout: 12000 });
+            const data = await res.json();
+            const ent = data?.entities?.[qid];
+            const label = ent?.labels?.en?.value || qid;
+            const description = ent?.descriptions?.en?.value || '';
+            const enTitle = titleHint || ent?.sitelinks?.enwiki?.title || null;
+            const info = { qid, label, description, wikipedia: null };
+            if (enTitle) {
+                const wiki = await this._fetchWikipediaSummary(enTitle);
+                info.wikipedia = wiki || null;
+            }
+            info.claims_parsed = this._parseWikidataClaims(ent, 'authority');
+            // Replace the existing ruler card in Learn More
+            const host = document.getElementById('learnMoreCards');
+            const card = host ? host.querySelector('[data-learn-card="ruler"]') : null;
+            if (!host || !card) return;
+            const nmFallback = null;
+            const renderCard = (t, i, n, o={}) => {
+                // Reuse the same rendering logic by calling existing method via Function bound context
+                // We replicate the minimal subset by inlining the same structure as in viewCoin's renderCard
+                const fakeTitle = t;
+                const isPeriod = o.period === true;
+                const truncate = (txt, chars=240) => {
+                    if (!txt) return '';
+                    const clean = String(txt).trim();
+                    if (clean.length <= chars) return clean;
+                    const slice = clean.slice(0, chars);
+                    const lastPeriod = slice.lastIndexOf('. ');
+                    if (lastPeriod > 100) return slice.slice(0, lastPeriod+1).trim();
+                    return slice.replace(/[\s,.]+$/, '') + '…';
+                };
+                const label = i?.label || n?.label || fakeTitle;
+                const fullDescRaw = i?.wikipedia?.long_extract || i?.wikipedia?.extract || i?.description || n?.definition || '';
+                const fullHtmlRaw = i?.wikipedia?.long_html || null;
+                const allowReadMore = !!fullDescRaw && o.readMore;
+                const summaryLimit = o.summaryLimit ?? (isPeriod ? 230 : 260);
+                const truncatedDesc = fullDescRaw ? (allowReadMore ? truncate(fullDescRaw, summaryLimit) : fullDescRaw) : '';
+                const isTruncated = allowReadMore && !!fullDescRaw && truncatedDesc !== fullDescRaw;
+                const descId = isTruncated ? `rulerDesc-${Math.random().toString(36).slice(2)}` : null;
+                const wikiUrl = i?.wikipedia?.content_urls?.desktop?.page || null;
+                const years = '';
+                let descBlock = `<div class="ruler-desc" style="color:#6b7280">No additional summary available.</div>`;
+                if (fullDescRaw) {
+                    if (isTruncated && descId) {
+                        const longHtml = fullHtmlRaw || this._formatWikipediaPlain(fullDescRaw);
+                        descBlock = `<div class="ruler-desc" id="${descId}" data-expanded="false"><div class="desc-short">${this.escapeHtml(truncatedDesc)}</div><div class="desc-long" hidden>${longHtml}</div></div>`;
+                    } else {
+                        const longHtml = fullHtmlRaw ? fullHtmlRaw : this._formatWikipediaPlain(truncatedDesc || fullDescRaw);
+                        descBlock = `<div class="ruler-desc">${longHtml}</div>`;
+                    }
+                }
+                const readBtnHtml = isTruncated && descId ? `<button type="button" class="btn-link learnmore-btn" data-desc-target="${descId}" aria-expanded="false">Read more</button>` : '';
+                const actionsHtml = readBtnHtml ? `<div class="learnmore-actions">${readBtnHtml}</div>` : '';
+                const needsUpgrade = (!!wikiUrl && !i?.wikipedia?.long_html);
+                const wikiTitle = i?.wikipedia?.title || i?.label || '';
+                const relationsPlaceholder = `<div class="bio-rel" data-rel-holder="true"></div>`;
+                const factsPlaceholder = `<div class="bio-facts" data-facts-holder="true"><div class="bio-facts-head">Bio (Wikidata)</div></div>`;
+                return `
+                <div class="card collapsible" data-learn-card="ruler"${needsUpgrade?` data-upgrade-desc="true" data-wiki-title="${this.escapeHtml(wikiTitle)}"`:''}>
+                    <h3 class="collapsible-head"><span class="caret"></span>About the ruler</h3>
+                    <div class="collapse-body">
+                        <div class="ruler-card">
+                            <div>
+                                <div class="ruler-name-row"><div class="ruler-name">${this.escapeHtml(label)}</div> ${years ? `<span class="years">${years}</span>` : ''}</div>
+                                ${factsPlaceholder}
+                                ${relationsPlaceholder}
+                                ${descBlock}
+                                ${actionsHtml}
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+            };
+            const html = renderCard('About the ruler', info, nmFallback, { key:'ruler', readMore:true });
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            const newCard = tmp.firstElementChild;
+            card.replaceWith(newCard);
+            // Wire expander
+            const btn = newCard.querySelector('[data-desc-target]');
+            if (btn) {
+                btn.addEventListener('click', () => {
+                    const targetId = btn.getAttribute('data-desc-target');
+                    const descEl = newCard.querySelector(`#${CSS.escape(targetId)}`) || null;
+                    if (!descEl) return;
+                    const shortEl = descEl.querySelector('.desc-short');
+                    const longEl = descEl.querySelector('.desc-long');
+                    const expanded = descEl.classList.toggle('expanded');
+                    if (shortEl) shortEl.hidden = expanded;
+                    if (longEl) longEl.hidden = !expanded;
+                    btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                    btn.textContent = expanded ? 'Show less' : 'Read more';
+                });
+            }
+            // Upgrade long content if needed
+            if (newCard.hasAttribute('data-upgrade-desc') && newCard.getAttribute('data-wiki-title')) {
+                (async()=>{
+                    const t = newCard.getAttribute('data-wiki-title');
+                    const long = await this._fetchWikipediaLongContent(t);
+                    const longHtml = long?.html || (long?.plain ? this._formatWikipediaPlain(long.plain) : '');
+                    if (longHtml) {
+                        const desc = newCard.querySelector('.ruler-desc .desc-long');
+                        if (desc) desc.innerHTML = longHtml;
+                    }
+                })();
+            }
+            // Populate relations for the newly loaded ruler
+            if (info.claims_parsed) {
+                if (newCard.querySelector('.bio-facts[data-facts-holder]')) { try { await this._populateBioFacts(newCard, info.claims_parsed); } catch(_){} }
+                try { await this._populateBioRelations(newCard, info.claims_parsed); } catch(_){ }
+            }
+        } catch (e) {
+            console.warn('Failed to load ruler Learn More from QID', qid, e);
+        }
+    }
+
+    async _fetchWikidataQidFromPageTitle(title){
+        if (!title) return null;
+        try {
+            const url = `https://en.wikipedia.org/w/api.php?action=query&prop=pageprops&titles=${encodeURIComponent(title)}&format=json&origin=*`;
+            const res = await this._fetchWithTimeout(url, { timeout: 12000 });
+            const data = await res.json();
+            const pages = data?.query?.pages || {};
+            for (const k of Object.keys(pages)){
+                const pp = pages[k]?.pageprops || {};
+                const q = pp?.wikibase_item || null;
+                if (q) return q;
+            }
+        } catch(_){}
+        return null;
+    }
+
+    async _ensureRulerBioRelationsFromWiki(lmHost, info){
+        if (!lmHost || !info) return;
+        const card = lmHost.querySelector('[data-learn-card="ruler"]');
+        const holder = card?.querySelector('.bio-rel[data-rel-holder]');
+        if (!holder) return;
+        const title = info?.wikipedia?.title || info?.label || null;
+        if (!title) return;
+        const qid = await this._fetchWikidataQidFromPageTitle(title);
+        if (!qid) return;
+        try {
+            const entityUrl = `https://www.wikidata.org/wiki/Special:EntityData/${qid}.json`;
+            const res = await this._fetchWithTimeout(entityUrl, { timeout: 12000 });
+            const data = await res.json();
+            const ent = data?.entities?.[qid];
+            const claims = this._parseWikidataClaims(ent, 'authority');
+            if (claims) await this._populateBioRelations(card, claims);
+        } catch(_){}
     }
 
     openMuseumFromOverview(){

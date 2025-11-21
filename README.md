@@ -130,6 +130,11 @@ Potential features to add:
 - Collection statistics and insights
 - Multiple collection support
 - Share individual coins via URL
+ - Smarter historical context extraction (expanding beyond first paragraph)
+
+## Wikipedia Context Cleaning
+
+When building the "Learn More" cards (About the ruler / About the period / etc.), the app fetches a long Wikipedia extract. Some pages return an infobox converted to plain text at the top (field lists like "Reign", "Predecessor", "Born"), which duplicated structured data already resolved from Wikidata/Nomisma. A heuristic cleaner now strips those leading metadata lines and starts the summary at the first narrative sentence containing "was". This keeps the contextual paragraph while avoiding noisy tabular dumps. If you notice a page where the intro was trimmed incorrectly, open an issue with the raw first lines so the heuristic can be refined.
 
 ## Contributing
 
