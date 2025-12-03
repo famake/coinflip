@@ -5,7 +5,7 @@ set -euo pipefail
 # Assumes this repo contains docker-compose.yml with a single 'web' service
 
 SERVICE=web
-PORT=8080
+PORT=80
 PROJECT_DIR=/opt/coinflip
 
 echo "🚀 Starting deployment (service: $SERVICE, port: $PORT)..."
