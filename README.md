@@ -148,4 +148,3 @@ MIT License - Feel free to use this for your own coin collection!
 
 - Three.js for 3D rendering capabilities
 - Modern web standards that make this possible without frameworks
-
